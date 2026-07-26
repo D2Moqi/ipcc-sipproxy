@@ -1,0 +1,4 @@
+cn.ipcc.sipproxy.autoconfigure.SipProxyAutoConfiguration
+cn.ipcc.sipproxy.autoconfigure.SipProxyWebSocketAutoConfiguration
+cn.ipcc.sipproxy.autoconfigure.SipProxyClusterAutoConfiguration
+cn.ipcc.sipproxy.autoconfigure.SipProxySessionAutoConfiguration

@@ -1,0 +1,160 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <!-- 设计意图：不使用 <parent> 继承任何父 pom（既不继承 spring-boot-starter-parent 也不继承 yudao 父 pom），
+         完全独立 POM，所有依赖版本显式指定，避免与 yudao-dependencies BOM 的版本管理冲突。
+         这样 ipcc-sipproxy 可被任意非 yudao 工程复用，且可独立 mvn package 打包为 jar。 -->
+    <!-- v1.2 修订：JAIN-SIP 版本统一为 1.2.1.4，补充 javax.servlet-api 排除 -->
+    <modelVersion>4.0.0</modelVersion>
+    <packaging>jar</packaging>
+
+    <groupId>cn.ipcc</groupId>
+    <artifactId>ipcc-sipproxy</artifactId>
+    <version>1.0.0</version>
+    <name>${project.artifactId}</name>
+    <description>
+        ipcc-sipproxy 模块，完全独立的 SIP 代理服务，不依赖任何 yudao 框架。
+        提供 SIP over WebSocket、B2BUA、会话管理、集群广播能力，
+        通过扩展点接口与父程序解耦，可被任意 Spring Boot 工程复用。
+    </description>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>${java.version}</maven.compiler.source>
+        <maven.compiler.target>${java.version}</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- 依赖版本独立管理（不依赖任何 BOM） -->
+        <spring-boot.version>3.5.9</spring-boot.version>
+        <!-- v1.2 修订：JAIN-SIP 统一版本 1.2.1.4（NIST JAIN-SIP 最稳定发布版本，API 与 RI 同发布周期，避免跨版本 AbstractMethodError） -->
+        <jain-sip.version>1.2.1.4</jain-sip.version>
+        <lombok.version>1.18.34</lombok.version>
+        <slf4j.version>2.0.16</slf4j.version>
+        <log4j-over-slf4j.version>2.0.16</log4j-over-slf4j.version>
+        <!-- hutool 工具集（StrUtil/IdUtil/CollUtil/DigestUtil/StrPool，原 cc-server 代码迁移保留） -->
+        <hutool.version>5.8.27</hutool.version>
+    </properties>
+
+    <!--
+        引入 spring-boot-dependencies BOM 进行依赖版本管理。
+        设计意图：spring-kafka / spring-rabbit 不沿用 Spring Boot 版本号（如 3.5.9），
+        各自有独立版本体系，原迁移方案文档使用 ${spring-boot.version} 是错误的。
+        通过 BOM import 让 Spring 生态依赖版本由 Spring Boot 3.5.9 官方对齐管理，确保兼容性。
+        约束：BOM import 仅做版本管理，不等同于 <parent> 继承，模块仍保持独立可发布。
+    -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <!-- Spring Boot 核心（compile，ipcc-sipproxy 自带，cc-server 引入时由其 BOM 管理版本） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter</artifactId>
+            <version>${spring-boot.version}</version>
+        </dependency>
+
+        <!-- Spring WebSocket（compile，sipproxy 自带 SIP over WebSocket 能力，独立运行测试时需要） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
+            <version>${spring-boot.version}</version>
+        </dependency>
+
+        <!-- Spring Data Redis（compile，sipproxy 会话存储依赖 Redis） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <version>${spring-boot.version}</version>
+        </dependency>
+
+        <!-- MQ 集群广播可选依赖（optional + compile，由父程序按需引入对应 MQ starter） -->
+        <!-- 版本由 spring-boot-dependencies BOM 管理（spring-kafka/spring-rabbit 不沿用 Spring Boot 版本号） -->
+        <dependency>
+            <groupId>org.springframework.kafka</groupId>
+            <artifactId>spring-kafka</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.amqp</groupId>
+            <artifactId>spring-rabbit</artifactId>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.rocketmq</groupId>
+            <artifactId>rocketmq-spring-boot-starter</artifactId>
+            <version>2.3.1</version>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- JAIN-SIP 核心 SIP 协议栈（模块自带版本管理，v1.2 统一为 1.2.1.4） -->
+        <dependency>
+            <groupId>javax.sip</groupId>
+            <artifactId>jain-sip-api</artifactId>
+            <version>${jain-sip.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>javax.sip</groupId>
+            <artifactId>jain-sip-ri</artifactId>
+            <version>${jain-sip.version}</version>
+            <!-- 设计意图：排除 log4j 1.x 传递依赖（通过 log4j-over-slf4j 桥接到 slf4j，避免与 logback 类冲突）；
+                 排除 javax.servlet-api（与 Spring Boot 3.x 的 Jakarta Servlet API 包名不同不直接冲突，
+                 但统一排除以保持依赖树清洁） -->
+            <exclusions>
+                <exclusion>
+                    <groupId>log4j</groupId>
+                    <artifactId>log4j</artifactId>
+                </exclusion>
+                <exclusion>
+                    <groupId>javax.servlet</groupId>
+                    <artifactId>javax.servlet-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- log4j 1.x → slf4j 桥接（jain-sip-ri 内部使用 log4j 1.x API，通过此桥接包转发到 slf4j/logback） -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>log4j-over-slf4j</artifactId>
+            <version>${log4j-over-slf4j.version}</version>
+        </dependency>
+
+        <!-- Lombok（provided，编译期注解处理） -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- hutool 工具集（原 cc-server 代码迁移保留 StrUtil/IdUtil/CollUtil/DigestUtil/StrPool 调用） -->
+        <dependency>
+            <groupId>cn.hutool</groupId>
+            <artifactId>hutool-all</artifactId>
+            <version>${hutool.version}</version>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+                <configuration>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
