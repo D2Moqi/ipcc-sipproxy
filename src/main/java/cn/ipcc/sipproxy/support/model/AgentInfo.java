@@ -3,11 +3,9 @@ package cn.ipcc.sipproxy.support.model;
 import lombok.Data;
 
 /**
- * 坐席信息数据模型（sipproxy 自有，不依赖 cc-server）
+ * 坐席信息数据模型
  * <p>
  * 设计意图：作为 sipproxy 与父程序之间的数据载体，仅包含 sipproxy 实际使用的字段，
- * 避免直接暴露父程序的 SysAgentDO（含 ORM 注解、租户上下文等框架依赖）。
- * 字段基于原 SysAgentDO 在 sipproxy 中的实际使用情况定义。
  * <p>
  * 由父程序实现 {@code cn.ipcc.sipproxy.api.agent.AgentInfoProvider} 时填充并返回。
  */

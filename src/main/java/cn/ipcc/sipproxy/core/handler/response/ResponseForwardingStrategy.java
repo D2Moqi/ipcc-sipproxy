@@ -16,7 +16,7 @@ import java.util.Map;
  * - FREESWITCH 来源：内部/外呼转发到 WebSocket，入呼转发到第三方
  * - THIRD_PARTY 来源：无论什么呼叫类型，都转发到 FreeSWITCH
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

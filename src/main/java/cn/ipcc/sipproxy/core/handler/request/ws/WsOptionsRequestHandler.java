@@ -18,7 +18,7 @@ import javax.sip.message.Response;
  * OPTIONS请求处理器
  * 处理OPTIONS保活请求
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

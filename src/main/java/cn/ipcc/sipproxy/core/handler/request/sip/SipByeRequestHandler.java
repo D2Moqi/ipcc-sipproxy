@@ -28,7 +28,7 @@ import javax.sip.message.Response;
  *   - 两段BYE相互独立,FS与坐席端各自处理媒体释放
  *   - CallInfo/会话信息的清理由CHANNEL_HANGUP_COMPLETE事件处理器统一完成,BYE处理器不参与清理
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

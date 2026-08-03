@@ -9,6 +9,7 @@ import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
 import cn.ipcc.sipproxy.support.SipProxyConstants;
 import cn.ipcc.sipproxy.support.model.AgentInfo;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
+import cn.ipcc.sipproxy.support.model.GatewayInfo;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -21,7 +22,7 @@ import javax.sip.message.Response;
  * 传入INVITE请求处理器
  * 处理来自FreeSWITCH/第三方SIP的INVITE请求
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component
@@ -109,7 +110,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             } else if (SipProxyConstants.THIRD_PARTY.equals(source)) {
                 // 第三方网关入局:按 INVITE 来源 IP 反查匹配的第三方网关节点并缓存(用于响应时回送),callType=INBOUND
                 String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
-                FsNodeInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
+                GatewayInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
                 if (thirdPartyNode != null) {
                     sessionInfo.setThirdPartyNode(thirdPartyNode);
                 }

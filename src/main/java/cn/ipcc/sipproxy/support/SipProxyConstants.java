@@ -3,9 +3,6 @@ package cn.ipcc.sipproxy.support;
 /**
  * sipproxy 模块通用常量
  * <p>
- * 设计意图：从原 {@code cn.iocoder.yudao.module.cc.sipproxy.constant.SipProxyConstants} 拷贝至
- * sipproxy 模块，仅改包名，常量定义保持一致以确保迁移期间行为对齐。
- * <p>
  * 包含信令来源标识、JSSIP 标识、会话状态、呼叫类型、支持的 SIP 方法集合等常量。
  */
 public interface SipProxyConstants {
@@ -17,8 +14,15 @@ public interface SipProxyConstants {
     /** 信令来源：第三方网关 */
     String THIRD_PARTY = "THIRD_PARTY";
 
-    /** JSSIP 标识常量（用于识别 JsSIP 客户端 User-Agent） */
-    String JSSIP = "JSSIP";
+    /** IPCC_JSSIP 标识常量（用于识别 IPCC_JSSIP 客户端 User-Agent，前端 JsSIP 统一设置此值） */
+    String IPCC_JSSIP = "IPCC_JSSIP";
+    /**
+     * FreeSWITCH User-Agent 标识常量
+     * 设计意图: FreeSWITCH 默认 User-Agent 形如 "FreeSWITCH-mod_sofia/1.10.12-...",
+     * 用于在 Response 来源识别时区分 FS 与第三方 SIP 服务(避免依赖 Via 头 received 参数,
+     * 该参数在 Response 中记录的是请求路径上节点的 IP,无法直接反映响应发送方)
+     */
+    String FREESWITCH_USER_AGENT = "FREESWITCH";
 
     /** 会话状态：邀请中（INVITE 已发送，等待响应） */
     String SESSION_STATUS_INVITING = "INVITING";
@@ -57,5 +61,25 @@ public interface SipProxyConstants {
      * 绕过校验，wire 格式输出 {@code ;transport=ws} 完全一致。
      */
     String TRANSPORT_PARAM = "transport";
+
+    // ===== JAIN-SIP 协议栈常量 =====
+    /** JAIN-SIP 实现类路径(gov.nist 为标准参考实现) */
+    String SIP_STACK_PATH = "gov.nist";
+    /** SipStack 名称(仅供 JAIN-SIP 内部标识) */
+    String STACK_NAME = "SipServiceStack";
+    /** 禁用自动对话框支持(B2BUA 场景需手动管理对话) */
+    String AUTOMATIC_DIALOG_SUPPORT_OFF = "off";
+    /** 未知 SIP 方法标识(日志兜底用) */
+    String UNKNOWN_METHOD = "unknown";
+
+    // ===== SIP 传输协议常量 =====
+    /** UDP 传输协议标识 */
+    String TRANSPORT_UDP = "udp";
+    /** TCP 传输协议标识 */
+    String TRANSPORT_TCP = "tcp";
+
+    // ===== SIP 响应状态码常量(JAIN-SIP 1.2 未提供 429 常量,此处自定义) =====
+    /** 429 Too Many Requests(请求过多,触发限流时返回) */
+    int STATUS_TOO_MANY_REQUESTS = 429;
 
 }

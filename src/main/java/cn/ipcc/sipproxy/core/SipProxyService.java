@@ -1,6 +1,10 @@
 package cn.ipcc.sipproxy.core;
 
 import cn.ipcc.sipproxy.autoconfigure.SipProxyProperties;
+import cn.ipcc.sipproxy.api.gateway.MessageSourceIdentifier;
+import cn.ipcc.sipproxy.api.security.IpWhitelist;
+import cn.ipcc.sipproxy.api.security.SipRateLimiter;
+import cn.ipcc.sipproxy.core.auth.GatewayAuthManager;
 import cn.ipcc.sipproxy.core.forwarder.SipMessageForwarder;
 import cn.ipcc.sipproxy.core.handler.request.sip.AbstractSipRequestHandler;
 import cn.ipcc.sipproxy.core.handler.request.sip.SipRequestHandlerFactory;
@@ -69,6 +73,18 @@ public class SipProxyService implements SipListener {
     @Resource
     private SipProxyProperties sipProxyProperties;
 
+    @Resource
+    private GatewayAuthManager gatewayAuthManager;
+
+    @Resource
+    private MessageSourceIdentifier messageSourceIdentifier;
+
+    @Resource
+    private IpWhitelist ipWhitelist;
+
+    @Resource
+    private SipRateLimiter sipRateLimiter;
+
     /** JAIN-SIP 协议栈实例 */
     private SipStack sipStack;
     /** UDP SipProvider（用于 SIP UDP 收发） */
@@ -79,6 +95,8 @@ public class SipProxyService implements SipListener {
     private MessageFactory messageFactory;
     /** SIP 头部工厂（构造 Via/Contact 等 header） */
     private HeaderFactory headerFactory;
+    /** SIP 地址工厂（构造 SipURI/Address 等） */
+    private javax.sip.address.AddressFactory addressFactory;
 
     /**
      * 初始化 SIP 协议栈与处理器
@@ -110,33 +128,30 @@ public class SipProxyService implements SipListener {
     private void initializeSipStack() {
         try {
             SipFactory sipFactory = SipFactory.getInstance();
-            sipFactory.setPathName("gov.nist");
+            sipFactory.setPathName(SipProxyConstants.SIP_STACK_PATH);
 
             Properties properties = new Properties();
-            properties.setProperty("javax.sip.STACK_NAME", "SipServiceStack");
-            properties.setProperty("javax.sip.AUTOMATIC_DIALOG_SUPPORT", "off");
+            properties.setProperty("javax.sip.STACK_NAME", SipProxyConstants.STACK_NAME);
+            properties.setProperty("javax.sip.AUTOMATIC_DIALOG_SUPPORT", SipProxyConstants.AUTOMATIC_DIALOG_SUPPORT_OFF);
 
             sipStack = sipFactory.createSipStack(properties);
 
             messageFactory = sipFactory.createMessageFactory();
             headerFactory = sipFactory.createHeaderFactory();
-            var addressFactory = sipFactory.createAddressFactory();
+            addressFactory = sipFactory.createAddressFactory();
 
             int sipPort = sipProxyProperties.getSip().getPort();
             String bindAddress = sipProxyProperties.getSip().getBindAddress();
 
             // UDP 监听点：用于接收/发送 SIP 消息
-            ListeningPoint udpListeningPoint = sipStack.createListeningPoint(bindAddress, sipPort, "udp");
+            ListeningPoint udpListeningPoint = sipStack.createListeningPoint(bindAddress, sipPort, SipProxyConstants.TRANSPORT_UDP);
             sipProvider = sipStack.createSipProvider(udpListeningPoint);
             sipProvider.addSipListener(this);
 
             // TCP 监听点：主要用来兼容接收 TCP SIP 消息
-            ListeningPoint tcpListeningPoint = sipStack.createListeningPoint(bindAddress, sipPort, "tcp");
+            ListeningPoint tcpListeningPoint = sipStack.createListeningPoint(bindAddress, sipPort, SipProxyConstants.TRANSPORT_TCP);
             sipProviderTcp = sipStack.createSipProvider(tcpListeningPoint);
             sipProviderTcp.addSipListener(this);
-
-            // 注入地址工厂到消息转发器
-            messageForwarder.setAddressFactory(addressFactory);
 
             log.info("[initializeSipStack][SIP 服务启动成功] port={}, bindAddress={}", sipPort, bindAddress);
         } catch (Exception e) {
@@ -148,8 +163,8 @@ public class SipProxyService implements SipListener {
     /**
      * 初始化处理器工厂
      * <p>
-     * 将 SIP 栈创建的 MessageFactory/HeaderFactory 注入到处理器工厂和消息转发器，
-     * 供后续 SIP 消息构造与转发使用。
+     * 将 SIP 栈创建的 MessageFactory/HeaderFactory 注入到处理器工厂、消息转发器和认证管理器，
+     * 供后续 SIP 消息构造、转发与认证使用。
      */
     private void initializeHandlers() {
         handlerFactory.setHeaderFactory(headerFactory);
@@ -162,8 +177,11 @@ public class SipProxyService implements SipListener {
         messageForwarder.setSipProvider(sipProvider);
         messageForwarder.setSipProviderTcp(sipProviderTcp);
         messageForwarder.setHeaderFactory(headerFactory);
+        messageForwarder.setAddressFactory(addressFactory);
         messageForwarder.setLocalIpAddress(sipProxyProperties.getSip().getBindAddress());
         messageForwarder.setSipPort(sipProxyProperties.getSip().getPort());
+
+        gatewayAuthManager.init(headerFactory, addressFactory, sipProvider, sipProviderTcp);
     }
 
     /**
@@ -210,7 +228,7 @@ public class SipProxyService implements SipListener {
                 return;
             }
             String transport = viaHeader.getTransport();
-            if (!"tcp".equalsIgnoreCase(transport)) {
+            if (!SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(transport)) {
                 return;
             }
             String host = viaHeader.getHost();
@@ -290,6 +308,8 @@ public class SipProxyService implements SipListener {
                 log.info("[handleWebSocketSipMessage][更新通话信息中 ws 端的联系地址] sessionId={}, contact={}", sessionId, contact);
             }
         }
+        Header userAgentHeader = headerFactory.createHeader(UserAgentHeader.NAME, SipProxyConstants.IPCC_JSSIP);
+        sipMessage.addHeader(userAgentHeader);
         if (sipMessage instanceof Request request) {
             String method = request.getMethod();
             AbstractWsSipRequestHandler handler = handlerFactory.getHandler(method);
@@ -300,8 +320,6 @@ public class SipProxyService implements SipListener {
                 handlerFactory.getDefaultHandler().handle(sessionId, request);
             }
         } else if (sipMessage instanceof Response response) {
-            Header userAgentHeader = headerFactory.createHeader(UserAgentHeader.NAME, SipProxyConstants.JSSIP);
-            response.addHeader(userAgentHeader);
             log.info("[handleSipResponse][收到 ws-SIP 响应] statusCode={}, callId={}, response={}",
                     response.getStatusCode(), SipAnalysisUtil.getCallId(response), response);
             AbstractSipResponseHandler handler = responseHandlerFactory.getHandler(response);
@@ -317,7 +335,9 @@ public class SipProxyService implements SipListener {
      * 处理流程：
      * <ol>
      *   <li>清理 TCP 请求的 Via 头（仅 TCP 生效）</li>
-     *   <li>识别消息来源（WEBSOCKET/FREESWITCH/THIRD_PARTY）</li>
+     *   <li>委托 {@link MessageSourceIdentifier} 扩展点识别消息来源（WEBSOCKET/FREESWITCH/THIRD_PARTY）</li>
+     *   <li>委托 {@link SipRateLimiter} 扩展点校验请求速率（不通过返回 429 Too Many Requests）</li>
+     *   <li>THIRD_PARTY 来源时委托 {@link IpWhitelist} 扩展点校验来源 IP（不通过返回 403 Forbidden）</li>
      *   <li>按 SIP 方法分发到对应 SipXxxRequestHandler</li>
      * </ol>
      */
@@ -331,12 +351,29 @@ public class SipProxyService implements SipListener {
             String callId = SipAnalysisUtil.getCallId(request);
             log.info("[processRequest][收到 SIP 请求] method={}, callId={}, request={}", method, callId, request);
 
-            String source = messageForwarder.identifyMessageSource(request);
+            // 委托 MessageSourceIdentifier 扩展点识别消息来源
+            String source = messageSourceIdentifier.identifySource(request);
             log.info("[processRequest][消息来源] source={}, method={}, callId={}", source, method, callId);
             if (source == null) {
                 log.warn("[processRequest][未知的消息来源] source={}", source);
                 return;
             }
+
+            // 委托 SipRateLimiter 扩展点校验请求速率
+            String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
+            if (sourceIp != null && !sipRateLimiter.tryAcquire(sourceIp, method)) {
+                log.warn("[processRequest][请求被限流] sourceIp={}, method={}, callId={}", sourceIp, method, callId);
+                sendErrorResponse(requestEvent, SipProxyConstants.STATUS_TOO_MANY_REQUESTS);
+                return;
+            }
+
+            // THIRD_PARTY 来源时委托 IpWhitelist 扩展点校验来源 IP
+            if (SipProxyConstants.THIRD_PARTY.equals(source) && sourceIp != null && !ipWhitelist.isAllowed(sourceIp)) {
+                log.warn("[processRequest][来源IP不在白名单] sourceIp={}, callId={}", sourceIp, callId);
+                sendErrorResponse(requestEvent, Response.FORBIDDEN);
+                return;
+            }
+
             AbstractSipRequestHandler handler = sipRequestHandlerFactory.getHandler(method);
             if (handler != null) {
                 handler.handle(request, callId, source);
@@ -346,6 +383,32 @@ public class SipProxyService implements SipListener {
             }
         } catch (Exception e) {
             log.error("[processRequest][处理 SIP 请求失败]", e);
+        }
+    }
+
+    /**
+     * 发送 SIP 错误响应
+     * <p>
+     * 处理逻辑：创建指定状态码的 Response，通过 ServerTransaction 发送给请求方。
+     * 用于安全校验失败（403/429）等场景。
+     *
+     * @param requestEvent 原始请求事件
+     * @param statusCode   SIP 状态码（如 403 Forbidden / 429 Too Many Requests）
+     */
+    private void sendErrorResponse(RequestEvent requestEvent, int statusCode) {
+        try {
+            Request request = requestEvent.getRequest();
+            Response response = messageFactory.createResponse(statusCode, request);
+            ServerTransaction serverTransaction = requestEvent.getServerTransaction();
+            if (serverTransaction == null) {
+                SipProvider sipProvider = (SipProvider) requestEvent.getSource();
+                serverTransaction = sipProvider.getNewServerTransaction(request);
+            }
+            serverTransaction.sendResponse(response);
+            log.info("[sendErrorResponse][已发送错误响应] statusCode={}, callId={}",
+                    statusCode, SipAnalysisUtil.getCallId(request));
+        } catch (Exception e) {
+            log.error("[sendErrorResponse][发送错误响应失败] statusCode={}", statusCode, e);
         }
     }
 
@@ -380,7 +443,7 @@ public class SipProxyService implements SipListener {
         String method = timeoutEvent.getClientTransaction() != null ?
                 timeoutEvent.getClientTransaction().getRequest().getMethod() :
                 (timeoutEvent.getServerTransaction() != null ?
-                        timeoutEvent.getServerTransaction().getRequest().getMethod() : "unknown");
+                        timeoutEvent.getServerTransaction().getRequest().getMethod() : SipProxyConstants.UNKNOWN_METHOD);
         log.warn("[processTimeout][SIP 消息超时] method={}, 场景: 事务层重传定时器到期未收到响应", method);
     }
 

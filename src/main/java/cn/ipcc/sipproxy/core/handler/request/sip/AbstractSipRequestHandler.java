@@ -6,6 +6,7 @@ import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.session.SipSessionManager;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
+import cn.ipcc.sipproxy.support.model.GatewayInfo;
 import jakarta.annotation.Resource;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
@@ -20,7 +21,7 @@ import java.text.ParseException;
  * 传入SIP请求处理器抽象基类
  * 用于处理来自FreeSWITCH/第三方SIP的SIP请求
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 public abstract class AbstractSipRequestHandler extends AbstractSipHandler {
@@ -100,8 +101,8 @@ public abstract class AbstractSipRequestHandler extends AbstractSipHandler {
             log.info("[forwardRequestByRegistration][转发到第三方SIP服务] callId={}, toUser={}", callId, toUser);
             // 按 INVITE 来源 IP 反查匹配的第三方网关节点
             String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
-            // selectThirdPartyNode 返回 FsNodeInfo（原为 FsConfigDO）
-            FsNodeInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
+            // selectThirdPartyNode 返回 GatewayInfo
+            GatewayInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
             if (thirdPartyNode != null) {
                 messageForwarder.forwardToThirdParty(request, thirdPartyNode);
             }

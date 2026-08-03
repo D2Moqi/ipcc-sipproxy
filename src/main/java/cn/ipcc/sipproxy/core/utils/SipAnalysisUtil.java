@@ -1,5 +1,6 @@
 package cn.ipcc.sipproxy.core.utils;
 
+import cn.ipcc.sipproxy.support.SipProxyConstants;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.sip.PeerUnavailableException;
@@ -46,6 +47,11 @@ public class SipAnalysisUtil {
     public static final String MESSAGE = "MESSAGE";
     public static final String UPDATE = "UPDATE";
 
+    /**
+     * 本工具类专用的 SIP 栈名称(仅用于创建 SipStack 解析消息,不实际运行)
+     */
+    private static final String STACK_NAME = "SipAnalysisUtilStack";
+
 
     private static final MessageFactory messageFactory;
     private static final HeaderFactory headerFactory;
@@ -55,12 +61,12 @@ public class SipAnalysisUtil {
         try {
             // 初始化SIP工厂和相关组件
             SipFactory sipFactory = SipFactory.getInstance();
-            sipFactory.setPathName("gov.nist");
+            sipFactory.setPathName(SipProxyConstants.SIP_STACK_PATH);
 
             // 设置SIP栈属性
             Properties properties = new Properties();
-            properties.setProperty("javax.sip.STACK_NAME", "SipAnalysisUtilStack");
-            properties.setProperty("javax.sip.AUTOMATIC_DIALOG_SUPPORT", "off");
+            properties.setProperty("javax.sip.STACK_NAME", STACK_NAME);
+            properties.setProperty("javax.sip.AUTOMATIC_DIALOG_SUPPORT", SipProxyConstants.AUTOMATIC_DIALOG_SUPPORT_OFF);
 
             // 创建SIP栈（不需要实际运行，仅用于解析）
             sipFactory.createSipStack(properties);
@@ -410,7 +416,10 @@ public class SipAnalysisUtil {
         Address fromAddress = fromHeader.getAddress();
         URI fromUri = fromAddress.getURI();
         SipURI sipUri = (SipURI) fromUri;
-        return sipUri.getHost() + ":" + sipUri.getPort();
+        // JAIN-SIP SipURI.getPort() 在 URI 未显式声明端口时返回 -1，
+        // 直接拼接会得到 "domain:-1" 的非法域名，需在端口<=0 时仅返回 host
+        int port = sipUri.getPort();
+        return port > 0 ? sipUri.getHost() + ":" + port : sipUri.getHost();
     }
 
     /**
@@ -451,7 +460,10 @@ public class SipAnalysisUtil {
                 return null;
             }
             javax.sip.address.SipURI toUri = (javax.sip.address.SipURI) toHeader.getAddress().getURI();
-            return toUri.getHost() + ":" + toUri.getPort();
+            // 与 getFromDomain 保持一致：SipURI.getPort() 在 URI 无显式端口时返回 -1，
+            // 此时仅返回 host，避免拼出 "domain:-1" 的非法域名
+            int port = toUri.getPort();
+            return port > 0 ? toUri.getHost() + ":" + port : toUri.getHost();
         } catch (Exception e) {
             log.error("[extractToDomain][提取To头域名失败]", e);
             return null;
@@ -485,7 +497,10 @@ public class SipAnalysisUtil {
                 return null;
             }
             javax.sip.address.SipURI fromUri = (javax.sip.address.SipURI) fromHeader.getAddress().getURI();
-            return fromUri.getHost() + ":" + fromUri.getPort();
+            // 与 getFromDomain 保持一致：SipURI.getPort() 在 URI 无显式端口时返回 -1，
+            // 此时仅返回 host，避免拼出 "domain:-1" 的非法域名
+            int port = fromUri.getPort();
+            return port > 0 ? fromUri.getHost() + ":" + port : fromUri.getHost();
         } catch (Exception e) {
             log.error("[extractFromDomain][提取From头域名失败]", e);
             return null;
@@ -535,6 +550,52 @@ public class SipAnalysisUtil {
     }
 
     /**
+     * 从SIP消息的Via头中提取来源端口
+     * <p>
+     * 优先级:
+     * <ol>
+     *   <li>Via 头的 rport 参数: 对端返回响应时,FS 等服务会回写真实接收端口(Response 场景下对应请求方的对外端口,
+     *       但在 Request 场景下对应发送方对外端口;对于 UDP Response,rport 记录的是请求发送方的源端口)</li>
+     *   <li>Via 头的 sent-by port: Via host:port 中的显式端口(如 Via: SIP/2.0/UDP 1.2.3.4:5060)</li>
+     *   <li>默认 5060: 无法获取时返回标准 SIP 端口</li>
+     * </ol>
+     * <p>
+     * 设计说明: 在 Request 场景中通过 (sourceIp, sourcePort) 与已注册的 FS 节点/网关列表精确匹配,
+     * 避免仅靠 User-Agent 误判(第三方网关也可能是 FreeSWITCH 部署,UA 相同)。
+     * Response 场景下此方法仅做兜底,响应来源识别优先依赖 SessionInfo 上下文。
+     *
+     * @param message SIP消息
+     * @return 来源端口号,无法获取时返回默认 5060
+     */
+    public static int getSourcePortFromMessage(Message message) {
+        verifyNullMessage(message);
+        try {
+            ViaHeader viaHeader = (ViaHeader) message.getHeader(ViaHeader.NAME);
+            if (viaHeader == null) {
+                log.warn("[getSourcePortFromMessage][未找到Via头,返回默认5060]");
+                return 5060;
+            }
+            // rport 参数: Response 场景由 FS 回写请求方的真实源端口
+            int rport = viaHeader.getRPort();
+            if (rport > 0) {
+                log.debug("[getSourcePortFromMessage][从rport参数获取端口] rport={}", rport);
+                return rport;
+            }
+            // sent-by port: Via host:port
+            int port = viaHeader.getPort();
+            if (port > 0) {
+                log.debug("[getSourcePortFromMessage][从Via头sent-by port获取] port={}", port);
+                return port;
+            }
+            log.debug("[getSourcePortFromMessage][Via头无端口,返回默认5060]");
+            return 5060;
+        } catch (Exception e) {
+            log.error("[getSourcePortFromMessage][提取来源端口失败]", e);
+            return 5060;
+        }
+    }
+
+    /**
      * 从SIP消息的Via头中提取transport参数
      * Via头格式: SIP/2.0/UDP 或 SIP/2.0/TCP
      *
@@ -547,7 +608,7 @@ public class SipAnalysisUtil {
             ViaHeader viaHeader = (ViaHeader) message.getHeader(ViaHeader.NAME);
             if (viaHeader == null) {
                 log.warn("[getTransportFromVia][未找到Via头]");
-                return "udp";
+                return SipProxyConstants.TRANSPORT_UDP;
             }
 
             String transport = viaHeader.getTransport();
@@ -558,10 +619,10 @@ public class SipAnalysisUtil {
             }
 
             log.debug("[getTransportFromVia][Via头无transport参数，默认返回udp]");
-            return "udp";
+            return SipProxyConstants.TRANSPORT_UDP;
         } catch (Exception e) {
             log.error("[getTransportFromVia][提取transport失败]", e);
-            return "udp";
+            return SipProxyConstants.TRANSPORT_UDP;
         }
     }
 
@@ -572,7 +633,7 @@ public class SipAnalysisUtil {
      * @return true表示使用TCP，false表示使用UDP
      */
     public static boolean isTcpTransport(Message message) {
-        return "tcp".equalsIgnoreCase(getTransportFromVia(message));
+        return SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(getTransportFromVia(message));
     }
 
     /**

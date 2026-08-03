@@ -1,4 +1,4 @@
-package cn.ipcc.sipproxy.core.interceptor;
+package cn.ipcc.sipproxy.api.interceptor;
 
 import javax.sip.message.Message;
 

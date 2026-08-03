@@ -11,7 +11,7 @@ import java.util.List;
  * sipproxy 在选择 SIP 信令转发目标时调用此接口，避免直接依赖父程序的 FsConfigService。
  * <p>
  * 设计约束：sipproxy 不连接 FreeSWITCH，仅承担信令转发；ESL 由父程序通过
- * {@code cn.ipcc.sipproxy.core.interceptor.SipMessageInterceptor} 实现。
+ * {@code cn.ipcc.sipproxy.api.interceptor.SipMessageInterceptor} 实现。
  */
 public interface FsNodeProvider {
 

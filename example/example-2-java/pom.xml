@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <!--
+        设计意图：example-2-java 是 ipcc-sipproxy 模块的集成示例工程，
+        通过继承 spring-boot-starter-parent 获得完整的 Spring Boot 工程脚手架（插件管理、版本对齐等），
+        与 ipcc-sipproxy 模块的独立 POM 形成对照，验证 sipproxy 可被任意标准 Spring Boot 工程复用。
+    -->
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.9</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>cn.ipcc.example</groupId>
+    <artifactId>example-2-java</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>${project.artifactId}</name>
+    <description>
+        ipcc-sipproxy 集成示例工程（Java 版），硬编码实现全部 14 个扩展点接口，
+        验证 sipproxy 模块与标准 Spring Boot 工程的集成能力。
+    </description>
+
+    <properties>
+        <java.version>17</java.version>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!-- Spring Boot Web（compile，提供 HTTP 服务能力与嵌入式容器） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!--
+            Spring Data Redis（compile，sipproxy 依赖 Redis 存储会话与注册信息：
+            SessionInfo TTL=120s、注册信息 TTL=3600s，会话内方法到达时刷新 TTL）
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!--
+            ipcc-sipproxy 模块（compile，B2BUA SIP 代理服务核心）。
+            注意：本模块尚未 mvn install 到本地仓库，编译需先在 ipcc-sipproxy 目录执行 mvn install，
+            或通过 IDE 模块依赖引入。pom.xml 中预先声明依赖，便于后续 install 后直接编译。
+        -->
+        <dependency>
+            <groupId>cn.ipcc</groupId>
+            <artifactId>ipcc-sipproxy</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <!--
+            Lombok（provided，编译期注解处理）。
+            ipcc-sipproxy 中 lombok 为 provided scope 不会传递，需在本工程显式声明，
+            用于扩展点实现类的 @Slf4j 注解生成 log 字段。
+        -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

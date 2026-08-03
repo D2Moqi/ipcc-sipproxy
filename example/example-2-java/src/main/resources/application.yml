@@ -1,0 +1,41 @@
+# Web 服务端口（示例工程独立端口，避免与 example-1 或其他示例冲突）
+server:
+  port: 8082
+
+spring:
+  data:
+    # Redis 连接配置：sipproxy 依赖 Redis 存储会话与注册信息（SessionInfo TTL=120s，注册信息 TTL=3600s）
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+
+# ipcc-sipproxy 配置（对应 SipProxyProperties，由 SipProxyAutoConfiguration 自动加载）
+sipproxy:
+  # 模块总开关：true 启用 sipproxy 自动配置与 SIP 监听
+  enabled: true
+  # 集群实例标识：多节点部署时唯一区分本实例（集群广播消息的发送方标识）
+  instance-id: example-2
+  sip:
+    # SIP UDP/TCP 监听端口（sipproxy 作为 B2BUA 的信令监听端口，与 example-1 的 5561 错开）
+    port: 5562
+    # 公网 IP：B2BUA 头域改写时替换 Contact/Via 为此地址（本机测试用 127.0.0.1）
+    public-ip: 127.0.0.1
+  websocket:
+    # WebSocket 接入路径：前端 JsSIP 通过此路径建立 SIP over WebSocket 连接
+    path: /sipproxy/ws
+    # 握手鉴权开关：true 表示握手时调用 WsHandshakeAuthenticator 校验 token
+    require-auth: true
+  heartbeat:
+    # 心跳空闲超时（秒）：超过该时长无消息的 WS 连接视为僵尸连接
+    idle-timeout: 90
+    # 僵尸连接清理开关：true 启用后台定时清理僵尸 WS 连接
+    zombie-clean-enabled: true
+  cluster:
+    # 集群广播类型：local=单实例（不跨节点广播）；可选 redis/rocketmq/rabbitmq/kafka
+    sender-type: local
+  session:
+    # 会话 TTL（秒）：SessionInfo 在 Redis 的过期时间，会话内方法到达时刷新 TTL
+    session-ttl: 120
+    # 注册 TTL（秒）：注册信息在 Redis 的过期时间，REGISTER 续期时刷新
+    register-ttl: 3600

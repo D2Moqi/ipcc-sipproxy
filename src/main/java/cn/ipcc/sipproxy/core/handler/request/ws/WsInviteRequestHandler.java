@@ -22,7 +22,7 @@ import javax.sip.message.Request;
  * INVITE请求处理器
  * 处理内部呼叫和外呼流程
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

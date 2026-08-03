@@ -3,14 +3,13 @@ package cn.ipcc.sipproxy.support.model;
 import lombok.Data;
 
 /**
- * 网关信息数据模型（sipproxy 自有，不依赖 cc-server）
+ * 网关信息数据模型
  * <p>
- * 设计意图：替代原 FsSipGatewayDO 在 sipproxy 中的使用场景，仅保留出局信令改写与来源识别所需字段，
- * 避免 sipproxy 直接依赖父程序 ORM 实体。用于：
+ * 设计意图：出局信令改写与来源识别
+ * 用于：
  * <ul>
  *   <li>{@code SipMessageForwarder.forwardToOutboundGateway} 出局 INVITE 改写</li>
- *   <li>{@code SipNodeManager.selectThirdPartyNode} 按 externalIp 反查节点</li>
- *   <li>{@code GatewayRouteServiceImpl} 路由选择</li>
+ *   <li>{@code SipNodeManager.selectThirdPartyNode} 按 address:port 反查节点</li>
  * </ul>
  * <p>
  * 由父程序实现 {@code cn.ipcc.sipproxy.api.gateway.GatewayProvider} 时填充并返回。
@@ -24,11 +23,11 @@ public class GatewayInfo {
     /** 网关名称（唯一标识，用于按名称查询） */
     private String name;
 
-    /** 网关类型（1-注册型 2-IP 型，对应 {@code cn.ipcc.sipproxy.support.GatewayTypeEnum}） */
-    private Integer type;
+    /** 网关地址（IP 或域名，出局 INVITE 的 target host） */
+    private String address;
 
-    /** 代理地址（出局 INVITE 的 target，格式 host:port） */
-    private String proxy;
+    /** 网关端口（出局 INVITE 的 target port） */
+    private Integer port;
 
     /** 外部线路号码（fromUser / DID，出局 INVITE 的 From/User-Agent 改写值） */
     private String externalLineNumber;
@@ -37,33 +36,45 @@ public class GatewayInfo {
     private String fromDomain;
 
     /**
-     * Caller-ID-In-From 标志（0=在 From 头使用原始主叫号码，非 0=使用 DID/externalLineNumber）
+     * Caller-ID-In-From 标志（0=在 From 头使用原始主叫号码，1=使用 DID/externalLineNumber）
      * <p>
      * 业务背景：出局 INVITE 信令改写时，需根据此标志决定 From 头使用主叫原始号码还是网关的外部线路号码。
-     * 对应原 FsSipGatewayDO.callerIdInFrom 字段，迁移时保留以维持原有业务逻辑。
      */
     private Integer callerIdInFrom;
 
     /**
-     * 是否需要注册（1=注册型网关，需注入 Authorization 头；0/空=IP 型网关，无需鉴权）
+     * 认证类型：0-不认证（IP 型），1-认证（账号密码型）
      * <p>
-     * 业务背景：出局 INVITE 信令改写时，若 register=1 且配置了 userName/password，
-     * 需注入 Authorization 头供网关鉴权。对应原 FsSipGatewayDO.register 字段。
+     * 业务背景：出局 INVITE 信令改写时，若 authType=1 且配置了 username/password，
+     * 需走 407 Digest 鉴权流程。
      */
-    private Integer register;
+    private Integer authType;
 
-    /** Realm（认证域，注册型网关鉴权使用） */
-    private String realm;
+    /** SIP传输协议：1-UDP，2-TCP（INVITE 发送与 407 鉴权重发均使用此字段） */
+    private Integer transportProtocol;
 
-    /** 用户名（注册型网关鉴权账号） */
+    /** 认证地址（预留字段，可为空；当前 INVITE 407 鉴权流程不使用，后续 REGISTER 场景可用） */
+    private String authAddress;
+
+    /** 认证端口（预留字段，可为空；说明同上） */
+    private Integer authPort;
+
+    /** 用户名（认证型网关鉴权账号） */
     private String username;
 
-    /** 密码（注册型网关鉴权密码） */
+    /** 密码（认证型网关鉴权密码） */
     private String password;
 
-    /** 注册 IP（用于按来源 IP 反查网关，识别 THIRD_PARTY 来源） */
-    private String externalIp;
+    /** 重试时间（秒，可选） */
+    private Integer retrySeconds;
 
-    /** Timer B（毫秒，可选；超出此时间未收到 1xx/2xx 响应则视为事务失败） */
-    private Long timerB;
+    /** 心跳时间（秒，可选） */
+    private Integer pingSeconds;
+
+    /** 超时时间（秒）— SIP Timer B */
+    private Integer expireSeconds;
+
+    /** 状态：0-启用，1-禁用；按 ID 查询后必须校验 status=0 方可用于出局 */
+    private Integer status;
+
 }

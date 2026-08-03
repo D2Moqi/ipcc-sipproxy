@@ -4,7 +4,7 @@ import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.ipcc.sipproxy.api.trace.TraceContext;
 import cn.ipcc.sipproxy.core.annotation.SipMethod;
-import cn.ipcc.sipproxy.core.interceptor.SipMessageInterceptor;
+import cn.ipcc.sipproxy.api.interceptor.SipMessageInterceptor;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
 import jakarta.annotation.Resource;
@@ -30,7 +30,7 @@ import javax.sip.message.Response;
  *      - 返回 false 表示父程序未接管，sipproxy 按默认转发逻辑（转发到 FS）
  *   3. 不存在 SipMessageInterceptor 时，按默认转发逻辑（转发到 FS）
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

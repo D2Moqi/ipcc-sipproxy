@@ -12,7 +12,7 @@ import lombok.extern.slf4j.Slf4j;
  * SIP 处理器公共基类
  * 包含所有 SIP 处理器共用的方法和依赖
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 public abstract class AbstractSipHandler {

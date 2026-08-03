@@ -4,6 +4,7 @@ import cn.ipcc.sipproxy.core.handler.response.ResponseForwardingStrategy;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.support.SipProxyConstants;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
+import cn.ipcc.sipproxy.support.model.GatewayInfo;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -14,7 +15,7 @@ import javax.sip.message.Request;
  * 默认SIP请求处理器
  * 处理来自WebSocket的未注册SIP方法（ACK/CANCEL/SUBSCRIBE/PRACK/UPDATE/INFO等），提供默认处理逻辑
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component
@@ -146,7 +147,7 @@ public class WsDefaultRequestHandler extends AbstractWsSipRequestHandler {
      * @throws Exception 转发失败时抛出
      */
     private void forwardToThirdPartyBySession(Request request, SessionInfo sessionInfo) throws Exception {
-        FsNodeInfo thirdPartyNode = sessionInfo.getThirdPartyNode();
+        GatewayInfo thirdPartyNode = sessionInfo.getThirdPartyNode();
         if (thirdPartyNode == null) {
             log.warn("[forwardToThirdPartyBySession][会话记录的第三方节点不存在，fallback到原逻辑] callId={}",
                     sessionInfo.getCallId());
@@ -155,7 +156,7 @@ public class WsDefaultRequestHandler extends AbstractWsSipRequestHandler {
         }
         messageForwarder.forwardToThirdParty(request, thirdPartyNode);
         log.info("[forwardToThirdPartyBySession][已转发到第三方SIP服务] callId={}, tp={}:{}",
-                sessionInfo.getCallId(), thirdPartyNode.getSipIp(), thirdPartyNode.getSipPort());
+                sessionInfo.getCallId(), thirdPartyNode.getAddress(), thirdPartyNode.getPort());
     }
 
     /**

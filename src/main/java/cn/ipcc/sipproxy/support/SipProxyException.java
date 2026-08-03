@@ -5,7 +5,6 @@ import lombok.Getter;
 /**
  * sipproxy 模块统一业务异常
  * <p>
- * 设计意图：替代原 cc-server 的 ServiceException，确保 sipproxy 模块不依赖 yudao 框架。
  * 错误码定义见 {@link SipProxyErrorCodeConstants}，使用 500-599 区间避免与父程序错误码冲突。
  */
 @Getter

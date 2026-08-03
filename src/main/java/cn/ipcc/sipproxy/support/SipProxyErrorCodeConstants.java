@@ -3,7 +3,6 @@ package cn.ipcc.sipproxy.support;
 /**
  * sipproxy 模块错误码常量
  * <p>
- * 设计意图：替代原 GlobalErrorCodeConstants，使用 500-599 区间避免与父程序错误码冲突。
  * 错误码在 {@link SipProxyException} 中使用，由 sipproxy 内部抛出，父程序可通过捕获异常获取 code 做差异化处理。
  */
 public final class SipProxyErrorCodeConstants {

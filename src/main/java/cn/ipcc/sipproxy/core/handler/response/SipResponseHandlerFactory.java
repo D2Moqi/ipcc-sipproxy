@@ -10,7 +10,7 @@ import javax.sip.message.Response;
  * SIP响应处理器工厂
  * 使用统一的响应处理器处理所有SIP响应
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

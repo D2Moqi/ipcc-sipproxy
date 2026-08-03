@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
  * SIP会话管理器（重构版）
  * 统一使用 SESSION_INFO_PREFIX 管理所有会话信息
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

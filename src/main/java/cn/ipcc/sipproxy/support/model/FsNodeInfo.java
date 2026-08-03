@@ -3,11 +3,7 @@ package cn.ipcc.sipproxy.support.model;
 import lombok.Data;
 
 /**
- * FS 节点信息数据模型（sipproxy 自有，不依赖 cc-server）
- * <p>
- * 设计意图：替代原 FsConfigDO 在 sipproxy 中的使用场景，仅保留信令转发所需的节点元数据，
- * 避免 sipproxy 直接依赖父程序 ORM 实体。用于 SessionInfo.freeSwitchNode / thirdPartyNode 字段，
- * 以及 SipNodeManager 选择目标 FS 节点时的数据载体。
+ * FS 节点信息数据模型
  * <p>
  * 由父程序实现 {@code cn.ipcc.sipproxy.api.fs.FsNodeProvider} 时填充并返回。
  */

@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <!--
+        继承 spring-boot-starter-parent：
+        设计意图与 ipcc-sipproxy 不同，example 作为示例工程直接继承 parent 以简化版本管理，
+        由 Spring Boot 3.5.9 官方 BOM 统一管控 starter 依赖版本。
+    -->
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.5.9</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>cn.ipcc.example</groupId>
+    <artifactId>example-1-java</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+    <name>${project.artifactId}</name>
+    <description>
+        example-1-java 示例工程：集成 ipcc-sipproxy 模块的默认实现 + H2 内存数据库，
+        不实现任何扩展点接口，全部使用 sipproxy 的 @ConditionalOnMissingBean 默认实现，
+        用于验证 SIP 注册等基础功能。
+    </description>
+
+    <properties>
+        <java.version>17</java.version>
+        <maven.compiler.source>${java.version}</maven.compiler.source>
+        <maven.compiler.target>${java.version}</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!-- Spring Boot Web（compile，提供 HTTP 服务能力） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-web</artifactId>
+        </dependency>
+
+        <!-- Spring Data Redis（compile，sipproxy 会话与注册信息存储依赖 Redis） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!-- Spring JDBC（compile，配合 H2 数据源，提供 JdbcTemplate 供 sipproxy 默认实现查询 seed 数据） -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-jdbc</artifactId>
+        </dependency>
+
+        <!-- ipcc-sipproxy 模块（compile，引入 B2BUA SIP 代理服务及 13 个扩展点的默认实现） -->
+        <dependency>
+            <groupId>cn.ipcc</groupId>
+            <artifactId>ipcc-sipproxy</artifactId>
+            <version>1.0.0</version>
+        </dependency>
+
+        <!-- H2 内存数据库（runtime，启动时通过 schema.sql + data.sql 初始化 seed 数据） -->
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>${project.artifactId}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

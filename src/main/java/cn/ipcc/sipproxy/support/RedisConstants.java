@@ -9,9 +9,7 @@ package cn.ipcc.sipproxy.support;
  *   <li>{@code sipproxy:} 模块命名空间，对应 artifactId {@code ipcc-sipproxy}，确保模块隔离</li>
  *   <li>{@code <category>:} 业务类别，与代码包结构对齐（session / user / message）</li>
  * </ul>
- * <p>
- * v1.2 修订：旧前缀 {@code sip:*} 改为 {@code ipcc:sipproxy:*}，避免与其他 SIP 相关模块冲突，
- * 并与 {@code sipproxy.session.redis-key-prefix} 配置项对齐。
+ *
  */
 public final class RedisConstants {
 

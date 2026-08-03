@@ -15,7 +15,7 @@ import java.util.Map;
  * 根据请求方法和来源选择合适的处理器
  * 使用 @SipMethod 注解自动注册处理器，新增处理器只需添加注解即可
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component

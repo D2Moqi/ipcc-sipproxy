@@ -1,5 +1,6 @@
 package cn.ipcc.sipproxy.core.handler.response;
 
+import cn.ipcc.sipproxy.api.gateway.MessageSourceIdentifier;
 import cn.ipcc.sipproxy.core.forwarder.SipMessageForwarder;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.session.SipSessionManager;
@@ -14,7 +15,7 @@ import javax.sip.message.Response;
  * SIP响应处理器抽象基类
  * 定义SIP响应处理的标准流程
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 public abstract class AbstractSipResponseHandler {
@@ -24,6 +25,9 @@ public abstract class AbstractSipResponseHandler {
 
     @Resource
     protected SipMessageForwarder messageForwarder;
+
+    @Resource
+    protected MessageSourceIdentifier messageSourceIdentifier;
 
 
     /**
@@ -53,11 +57,10 @@ public abstract class AbstractSipResponseHandler {
 
         // 407 Proxy Authentication Required拦截处理：第三方网关要求代理鉴权时，注入Proxy-Authorization重发INVITE
         if (statusCode == Response.PROXY_AUTHENTICATION_REQUIRED) {
-            String source = messageForwarder.identifyMessageSource(response);
+            String source = messageSourceIdentifier.identifySource(response);
             String gatewayId = sessionInfo.getGatewayId();
             if (SipProxyConstants.THIRD_PARTY.equals(source) && gatewayId != null && !gatewayId.isEmpty()) {
-                // originalInvite传null，handle407ProxyAuth内部从sessionInfo.originalInviteContent解析重建
-                boolean retried = messageForwarder.handle407ProxyAuth(response, sessionInfo, null);
+                boolean retried = messageForwarder.handle407ProxyAuth(response, sessionInfo);
                 if (retried) {
                     log.info("[handle][407鉴权重发成功，拦截407不转发到坐席] callId={}", callId);
                     return;

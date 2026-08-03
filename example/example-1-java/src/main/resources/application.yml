@@ -1,0 +1,40 @@
+server:
+  port: 8081 # HTTP 服务端口（与 sipproxy SIP 端口 5561 区分）
+
+spring:
+  # H2 内存数据库初始化：启动时执行 schema.sql（建表）+ data.sql（seed 数据）
+  # schema.sql 与 data.sql 来源于 ipcc-sipproxy 依赖 jar 的 classpath，无需在本工程重复创建
+  sql:
+    init:
+      mode: always # 始终执行 SQL 初始化（内存库每次启动均需重建）
+      schema-locations: classpath:schema.sql
+      data-locations: classpath:data.sql
+  datasource:
+    url: jdbc:h2:mem:sipproxy;DB_CLOSE_DELAY=-1;MODE=MySQL # H2 内存库，MySQL 兼容模式，JVM 存活期间不关闭
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  data:
+    redis:
+      host: localhost # Redis 地址（sipproxy 会话与注册信息存储依赖）
+      port: 6379
+      database: 0
+
+# ipcc-sipproxy 配置
+sipproxy:
+  enabled: true # 启用 sipproxy 自动配置
+  instance-id: example-1 # 集群实例标识（本例单机 local 模式）
+  sip:
+    port: 5561 # SIP UDP/TCP 监听端口
+    public-ip: 127.0.0.1 # 公网 IP（Contact/Via 头域改写为本机地址）
+  websocket:
+    path: /sipproxy/ws # SIP over WebSocket 接入路径
+    require-auth: true # WS 握手需 token 认证（使用默认 WsHandshakeAuthenticator）
+  heartbeat:
+    idle-timeout: 90 # WS 空闲超时（秒），超时判定为僵尸会话
+    zombie-clean-enabled: true # 启用僵尸会话定时清理
+  cluster:
+    sender-type: local # 集群广播类型：local 单实例（无跨节点广播）
+  session:
+    session-ttl: 120 # 会话 TTL（秒），会话内方法到达时刷新
+    register-ttl: 3600 # 注册信息 TTL（秒）

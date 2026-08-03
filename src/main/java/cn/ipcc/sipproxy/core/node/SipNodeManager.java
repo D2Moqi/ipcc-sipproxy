@@ -16,7 +16,6 @@ import org.springframework.stereotype.Component;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.stream.Collectors;
 
 /**
  * SIP 节点管理器
@@ -94,7 +93,7 @@ public class SipNodeManager {
     /**
      * 缓存会话-第三方节点映射
      */
-    public void cacheThirdPartySessionNode(String callId, FsNodeInfo node) {
+    public void cacheThirdPartySessionNode(String callId, GatewayInfo node) {
         try {
             String nodeJson = objectMapper.writeValueAsString(node);
             stringRedisTemplate.opsForValue().set(
@@ -111,12 +110,12 @@ public class SipNodeManager {
     /**
      * 获取会话第三方节点映射
      */
-    public FsNodeInfo getThirdPartySessionNode(String callId) {
+    public GatewayInfo getThirdPartySessionNode(String callId) {
         try {
             String nodeJson = stringRedisTemplate.opsForValue().get(
                     RedisConstants.SESSION_THIRD_PARTY_MAPPING_PREFIX + callId);
             if (nodeJson != null) {
-                return objectMapper.readValue(nodeJson, FsNodeInfo.class);
+                return objectMapper.readValue(nodeJson, GatewayInfo.class);
             }
         } catch (Exception e) {
             log.error("[getThirdPartySessionNode][获取第三方节点失败] callId={}", callId, e);
@@ -135,48 +134,17 @@ public class SipNodeManager {
     // ========== 第三方节点列表 ==========
 
     /**
-     * 将 GatewayInfo 转换为 FsNodeInfo
-     * <p>
-     * 业务背景：原 cc-server 中 getAllThirdPartyNodes 通过 FsSipGatewayService.getListByExternalCache
-     * 获取 FsSipGatewayDO 列表，再 convertToFsConfig 转为 FsConfigDO。迁移后通过 GatewayProvider.listGateways()
-     * 获取 GatewayInfo 列表，转为 FsNodeInfo 以保持原有 SessionInfo.thirdPartyNode 类型契约。
-     */
-    private FsNodeInfo convertToFsNode(GatewayInfo gateway) {
-        FsNodeInfo node = new FsNodeInfo();
-        // GatewayInfo.id 为 String 形式，FsNodeInfo.id 为 Long；解析失败时不影响核心信令转发
-        try {
-            node.setId(gateway.getId() != null ? Long.valueOf(gateway.getId()) : null);
-        } catch (NumberFormatException e) {
-            log.warn("[convertToFsNode][网关ID非数字格式,忽略] gatewayId={}", gateway.getId());
-        }
-        node.setName(gateway.getName());
-        // 解析 proxy 字段获取 IP 和端口，默认端口 5060
-        String proxy = gateway.getProxy();
-        if (proxy != null) {
-            String[] parts = proxy.split(":");
-            node.setSipIp(parts[0]);
-            node.setSipPort(parts.length > 1 ? Integer.parseInt(parts[1]) : 5060);
-        }
-        // 状态默认 1（在线），原 FsConfigDO convertToFsConfig 设置 status=0，
-        // 但 GatewayInfo 通常仅返回在线网关，这里设为 1 表示可选用
-        node.setStatus(1);
-        return node;
-    }
-
-    /**
      * 获取所有第三方节点
      */
-    public List<FsNodeInfo> getAllThirdPartyNodes() {
+    public List<GatewayInfo> getAllThirdPartyNodes() {
         try {
-            // 通过 GatewayProvider 扩展点获取外部网关列表（原 fsSipGatewayService.getListByExternalCache）
-            List<GatewayInfo> gatewayList = gatewayProvider.listGateways();
+            // 通过 GatewayProvider 扩展点获取外部网关列表
+            List<GatewayInfo> gatewayList = gatewayProvider.listEnabledGateways();
             if (CollUtil.isEmpty(gatewayList)) {
                 return Collections.emptyList();
             }
             // 将 GatewayInfo 转换为 FsNodeInfo
-            return gatewayList.stream()
-                    .map(this::convertToFsNode)
-                    .collect(Collectors.toList());
+            return gatewayList;
         } catch (Exception e) {
             log.error("[getAllThirdPartyNodes][获取第三方节点列表失败]", e);
         }
@@ -282,87 +250,49 @@ public class SipNodeManager {
      *
      * <p>处理逻辑：
      * 1. 优先返回已缓存的会话第三方节点（同一会话多次调用保持一致）
-     * 2. 遍历所有第三方节点，按 sourceIp 与节点 IP 匹配
-     * 3. 节点 IP 可能存储为 "ip:port" 格式，匹配前需分割取 IP 部分
-     * 4. 匹配成功返回该节点；全部不匹配时 fallback 到第一个节点并打印告警日志</p>
+     * 2. 遍历所有第三方节点，按 sourceIp 与节点 address 精确匹配
+     * 3. 匹配成功返回该节点；全部不匹配时返回 null，不做 fallback（避免错误路由）</p>
      *
      * @param callId   Call-ID，用于日志关联与会话缓存，可为 null
      * @param sourceIp INVITE 来源 IP（不含端口，由 Via 头解析得到），可为 null
-     * @return 匹配到的第三方节点；节点列表为空时返回 null
+     * @return 匹配到的第三方节点；无匹配或节点列表为空时返回 null
      */
-    public FsNodeInfo selectThirdPartyNode(String callId, String sourceIp) {
-        // 优先返回已缓存节点，保证同一会话多次调用选择同一第三方网关
+    public GatewayInfo selectThirdPartyNode(String callId, String sourceIp) {
         if (callId != null) {
-            FsNodeInfo cachedNode = getThirdPartySessionNode(callId);
+            GatewayInfo cachedNode = getThirdPartySessionNode(callId);
             if (cachedNode != null) {
                 return cachedNode;
             }
         }
 
-        List<FsNodeInfo> allNodes = getAllThirdPartyNodes();
+        List<GatewayInfo> allNodes = getAllThirdPartyNodes();
         if (allNodes.isEmpty()) {
             log.warn("[selectThirdPartyNode][第三方节点列表为空] callId={}, sourceIp={}", callId, sourceIp);
             return null;
         }
 
-        FsNodeInfo selectedNode = null;
-        // 按 sourceIp 反查匹配的网关节点，区分多个第三方网关入呼
+        GatewayInfo selectedNode = null;
         if (sourceIp != null) {
-            for (FsNodeInfo node : allNodes) {
-                String nodeIp = extractIp(node.getSipIp());
-                if (sourceIp.equals(nodeIp)) {
+            for (GatewayInfo node : allNodes) {
+                if (sourceIp.equals(node.getAddress())) {
                     selectedNode = node;
                     break;
                 }
             }
         }
 
-        // 匹配失败 fallback 到第一个节点，保证入呼流程不中断
         if (selectedNode == null) {
-            selectedNode = allNodes.get(0);
-            log.warn("第三方节点按来源IP匹配失败，fallback到第一个节点 callId={}, sourceIp={}", callId, sourceIp);
+            log.warn("[selectThirdPartyNode][来源IP未匹配任何网关，返回null] callId={}, sourceIp={}", callId, sourceIp);
+            return null;
         }
 
         if (callId != null) {
             cacheThirdPartySessionNode(callId, selectedNode);
-            log.debug("[selectThirdPartyNode][Call-ID: {} 选择第三方SIP节点: {}:{}]",
-                    callId, selectedNode.getSipIp(), selectedNode.getSipPort());
+            log.debug("[selectThirdPartyNode][选择第三方SIP节点] callId={}, node={}:{}",
+                    callId, selectedNode.getAddress(), selectedNode.getPort());
         }
 
         return selectedNode;
-    }
-
-    /**
-     * 从节点 IP 字段中提取纯 IP（去掉端口部分）
-     *
-     * <p>节点 IP 可能存储为 "ip" 或 "ip:port" 格式，匹配前需统一为纯 IP。
-     * 兼容 IPv4 与 IPv6：
-     * - IPv6 方括号格式 "[::1]:5060" 取方括号内 IP
-     * - IPv4 "ip:port" 格式（仅含一个冒号）取冒号前部分
-     * - 纯 IPv6（含多个冒号，无端口）整体返回</p>
-     *
-     * @param ipField 节点 IP 字段值，可为 null
-     * @return 纯 IP 地址；入参为 null 时返回 null
-     */
-    private String extractIp(String ipField) {
-        if (ipField == null) {
-            return null;
-        }
-        String trimmed = ipField.trim();
-        // IPv6 方括号格式 [::1]:5060 → 取方括号内 IP
-        if (trimmed.startsWith("[")) {
-            int endBracket = trimmed.indexOf(']');
-            if (endBracket > 0) {
-                return trimmed.substring(1, endBracket);
-            }
-        }
-        // IPv4 "ip:port" 格式（仅含一个冒号）取冒号前部分；纯 IPv6（含多个冒号）整体返回
-        int firstColon = trimmed.indexOf(':');
-        int lastColon = trimmed.lastIndexOf(':');
-        if (firstColon > 0 && firstColon == lastColon) {
-            return trimmed.substring(0, firstColon);
-        }
-        return trimmed;
     }
 
     public FsNodeInfo selectAlternativeFreeSwitchNode(List<FsNodeInfo> triedNodes, String callId) {
@@ -399,9 +329,5 @@ public class SipNodeManager {
                 alternativeNode.getSipIp(), alternativeNode.getSipPort());
 
         return alternativeNode;
-    }
-
-    public List<FsNodeInfo> getAllFreeSwitchNodes() {
-        return getOnlineFsNodes();
     }
 }

@@ -70,7 +70,18 @@ functions/mock
 .umi-production
 
 # screenshot
-screenshots
-__pycache__
+screenshot
 .firebase
 sessionStore
+
+# IntelliJ IDEA 多类型项目工作配置文件不过滤
+!.idea/jb-workspace.xml
+
+# trae
+/.trae/specs/
+/.trae/documents/
+
+# python
+__pycache__/
+*.pyc
+*.pyo

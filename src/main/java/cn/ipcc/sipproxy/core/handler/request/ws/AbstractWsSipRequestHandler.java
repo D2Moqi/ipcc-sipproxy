@@ -22,7 +22,7 @@ import java.text.ParseException;
  * SIP请求处理器基类
  * 使用模板方法模式，定义SIP请求处理的标准流程
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 public abstract class AbstractWsSipRequestHandler extends AbstractSipHandler {

@@ -17,7 +17,7 @@ import javax.sip.message.Response;
  * 传入其他SIP请求处理器
  * 处理来自FreeSWITCH/第三方SIP的其他SIP请求（非INVITE、BYE、ACK）
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Slf4j
 @Component
@@ -160,7 +160,7 @@ public class SipDefaultRequestHandler extends AbstractSipRequestHandler {
         }
         // 改写 WebSocket 代理头（Contact/Via/Request-URI）
         Message modifiedRequest = messageForwarder.modifyWsProxyHeaders(request);
-        messageForwarder.forwardToWebSocket(sessionId, modifiedRequest);
+        messageForwarder.toWebSocket(sessionId, modifiedRequest);
         log.info("[forwardToWebSocket][已转发到WebSocket] callId={}, sessionId={}",
                 sessionInfo.getCallId(), sessionId);
     }
@@ -207,8 +207,8 @@ public class SipDefaultRequestHandler extends AbstractSipRequestHandler {
         messageForwarder.forwardToThirdParty(request, sessionInfo.getThirdPartyNode());
         log.info("[forwardToThirdParty][已转发到第三方SIP服务] callId={}, node={}:{}",
                 sessionInfo.getCallId(),
-                sessionInfo.getThirdPartyNode().getSipIp(),
-                sessionInfo.getThirdPartyNode().getSipPort());
+                sessionInfo.getThirdPartyNode().getAddress(),
+                sessionInfo.getThirdPartyNode().getPort());
     }
 
     /**

@@ -10,7 +10,7 @@ import java.lang.annotation.*;
  * @SipMethod("INVITE")
  * public class InviteRequestHandler extends AbstractSipRequestHandler { }
  *
- * @author 芋道源码
+ * @author ipcc
  */
 @Target(ElementType.TYPE)
 @Retention(RetentionPolicy.RUNTIME)
