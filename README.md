@@ -43,6 +43,10 @@
 
 模块采用 **完全独立 POM** 设计（不继承 `spring-boot-starter-parent`，也不依赖 yudao 框架），通过 13 个扩展点接口与父程序解耦，默认实现保证模块可独立启动。
 
+example-jssip测试示例图
+
+![example-test.png](.images/example-test.png)
+
 ## 核心特性
 
 - **B2BUA 信令核心**：两段独立 INVITE 对话、不依赖 Record-Route、BYE 两段独立协调

@@ -43,6 +43,11 @@
 
 The module adopts a **fully independent POM** design (it does not inherit `spring-boot-starter-parent` and has no dependency on the yudao framework). It is decoupled from the host application through 13 extension-point interfaces, with default implementations that allow the module to start standalone.
 
+
+example-jssip test example image
+
+![example-test.png](.images/example-test.png)
+
 ## Key Features
 
 - **B2BUA signaling core**: two independent INVITE dialogs, no reliance on Record-Route, BYE coordinated on both legs independently
