@@ -178,8 +178,8 @@ public class SipProxyService implements SipListener {
         messageForwarder.setSipProviderTcp(sipProviderTcp);
         messageForwarder.setHeaderFactory(headerFactory);
         messageForwarder.setAddressFactory(addressFactory);
-        messageForwarder.setLocalIpAddress(sipProxyProperties.getSip().getBindAddress());
-        messageForwarder.setSipPort(sipProxyProperties.getSip().getPort());
+        messageForwarder.setLocalIpAddress(sipProxyProperties.getSip().getPublicIp());
+        messageForwarder.setSipPort(sipProxyProperties.getSip().getPublicPort());
 
         gatewayAuthManager.init(headerFactory, addressFactory, sipProvider, sipProviderTcp);
     }

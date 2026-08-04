@@ -1,5 +1,7 @@
 package cn.ipcc.sipproxy.defaults.gateway;
 
+import cn.hutool.core.text.CharPool;
+import cn.hutool.core.text.StrPool;
 import cn.hutool.core.util.StrUtil;
 import cn.ipcc.sipproxy.api.agent.AgentInfoProvider;
 import cn.ipcc.sipproxy.api.fs.FsNodeProvider;
@@ -137,8 +139,9 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
         try {
             String fromUser = SipAnalysisUtil.getFromUser(message);
             String fromDomainWithPort = SipAnalysisUtil.getFromDomain(message);
-            // From 头 host 可能带端口(如 cc.voipxt.cn:5060),坐席表 domain 字段存纯域名,需剥离端口
-            String fromDomainHost = stripPortFromHost(fromDomainWithPort);
+            // 兼容原始域名
+            String[] split = fromUser.split(String.valueOf(CharPool.AMP));
+            String fromDomainHost = split.length > 1 ? split[1] : fromDomainWithPort;
             if (StrUtil.isNotBlank(fromUser)) {
                 AgentInfo agent = agentInfoProvider.getAgent(fromUser, fromDomainHost);
                 if (agent != null) {

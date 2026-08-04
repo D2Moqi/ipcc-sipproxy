@@ -445,6 +445,16 @@ public class SipMessageForwarder {
                     String userName = null;
                     if (originalRequestUri instanceof SipURI originalSipUri) {
                         userName = originalSipUri.getUser();
+                        // FS originate 目标使用 "坐席号&域名" 格式(如 "1002&1.com%3A1"),
+                        // 转发到 WebSocket 时 JsSIP 期望 Request-URI user 部分为纯坐席号(如 "1002"),
+                        // 否则无法匹配 JsSIP 注册 URI,不触发 newRTCSession 事件,坐席B 收不到来电.
+                        // 此处去掉 '&' 及之后的域名部分,仅保留坐席号.
+                        if (userName != null) {
+                            int ampIdx = userName.indexOf('&');
+                            if (ampIdx >= 0) {
+                                userName = userName.substring(0, ampIdx);
+                            }
+                        }
                     }
                     requestUri = addressFactory.createSipURI(userName, localIpAddress);
                     requestUri.setPort(sipPort);

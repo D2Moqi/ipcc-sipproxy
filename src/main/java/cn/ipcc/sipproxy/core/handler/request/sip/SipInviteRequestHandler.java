@@ -1,7 +1,9 @@
 package cn.ipcc.sipproxy.core.handler.request.sip;
 
+import cn.hutool.core.text.CharPool;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
+import cn.hutool.core.util.URLUtil;
 import cn.ipcc.sipproxy.api.trace.TraceContext;
 import cn.ipcc.sipproxy.core.annotation.SipMethod;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
@@ -161,11 +163,25 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
         // 注意: FS originate的目标是 sipProxyAddr(cc.sip-proxy.public-ip:port), INVITE的To头domain是公网IP,
         //       而JsSIP坐席注册时使用的domain是配置的SIP域(如1.com:1), 两者不一致.
         //       因此需要按username查询坐席记录,获取其真实domain,再用真实domain转发到WebSocket.
+        // 目标号码格式: FlowAgentRouteHandler 传入的 called = agentNumberName + "&" + domain,
+        //   例如 "1002&1.com:1". 通过 '&' 分隔符可同时携带坐席号和原始域名,
+        //   用于多租户场景下按 (坐席号, 域名) 精确定位坐席,避免同号不同域的坐席混淆.
         if (SipProxyConstants.FREESWITCH.equals(source) && StrUtil.isBlank(gatewayId)) {
-            // 按 username 查询坐席记录（原 sysAgentService.listByNameAndDomainNoTenant(toUser, null) 返回 List）
-            // 改为 AgentInfoProvider.getAgent(toUser, null) 返回单个 AgentInfo
-            // domain 传 null,SQL不拼接domain条件,避免公网IP与配置SIP域不匹配导致查不到
-            AgentInfo agent = agentInfoProvider.getAgent(toUser, null);
+            // 拆分 "坐席号&域名" 格式: split[0]=坐席号(如1002), split[1]=原始域名(如1.com:1)
+            // 原始域名优先于 URI host 作为坐席查询条件,解决 FS originate 目标是公网 IP 但坐席注册域名为业务域的不一致问题
+            String[] split = toUser.split(String.valueOf(CharPool.AMP));
+            String agentNumber = split[0];
+            // URL 解码域名: SIP URI user part 中的 ":" 会被 JAIN-SIP 编码为 "%3A"(如 "1.com%3A1"),
+            // 需解码还原为 "1.com:1" 以匹配数据库中存储的原始域名,否则坐席查询 WHERE domain='1.com%3A1' 返回空,
+            // 导致快速推送路径被跳过,呼叫回退到 FS park 形成路由失败
+            if (split.length > 1) {
+                toDomain = URLUtil.decode(split[1]);
+            }
+            // 关键修复: 坐席查询和 WebSocket 转发必须使用拆分后的纯坐席号(agentNumber),
+            // 不能用完整 toUser(如 "1002&1.com:1"),否则数据库 name 字段匹配失败返回 null,
+            // 且 Redis 会话 key(user:session:1002&1.com:1:domain)与注册 key(user:session:1002:domain)不一致,
+            // 导致快速推送路径被跳过,呼叫回退到 FS park 形成死循环,坐席B永远收不到来电.
+            AgentInfo agent = agentInfoProvider.getAgent(agentNumber, toDomain);
             if (agent != null) {
                 String agentDomain = agent.getDomain();
                 // 关键: 按 Via 头端口识别发起 originate 的 FS 实例,覆盖 hash 选择的 freeSwitchNode。
@@ -180,9 +196,9 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
                         sessionManager.cacheSessionInfo(sessionInfo);
                     }
                 }
-                log.info("[handleIncomingRequest][检测到FS源INVITE被叫为已注册JsSIP坐席,直接推送到WebSocket] callId={}, toUser={}, agentDomain={}",
-                        callId, toUser, agentDomain);
-                messageForwarder.forwardToWebSocketByUser(toUser, agentDomain, request);
+                log.info("[handleIncomingRequest][检测到FS源INVITE被叫为已注册JsSIP坐席,直接推送到WebSocket] callId={}, agentNumber={}, agentDomain={}",
+                        callId, agentNumber, agentDomain);
+                messageForwarder.forwardToWebSocketByUser(agentNumber, agentDomain, request);
                 return;
             }
         }
