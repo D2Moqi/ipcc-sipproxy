@@ -523,7 +523,24 @@ public class SipMessageForwarder {
         }
         log.info("[modifySdpForWebSocket][替换SDP中的FS媒体地址] callId={}, oldIp={}, newIp={}",
                 callId, currentIp, fsPublicIp);
-        String newSdpBody = sdpBody.replace(currentIp, fsPublicIp);
+        // 精确替换 c=IN IP4 行和 a=candidate 行中的 FS 内网 IP 为公网 IP
+        // 需求背景: FS 部署在内网(10.2.0.14), 坐席通过公网(62.234.191.165)连接 SIP 代理。
+        //   FS 生成的 SDP 中 c= 行和 a=candidate 行均包含 FS 内网 IP, 坐席无法直接访问,
+        //   必须替换为公网 IP 才能建立 ICE 连接和 DTLS-SRTP 握手。
+        // 设计约束:
+        //   1. c=IN IP4 行: 连接信息行, 直接替换 IP
+        //   2. a=candidate 行: ICE 候选地址行, 只替换第 5 个字段(连接地址)中的 IP
+        //   3. 不使用全局 sdpBody.replace(): 避免误改 o= 行或其他位置的 IP
+        String escapedCurrentIp = java.util.regex.Matcher.quoteReplacement(currentIp);
+        String escapedFsPublicIp = java.util.regex.Matcher.quoteReplacement(fsPublicIp);
+        // 第一步: 替换 c=IN IP4 行
+        String newSdpBody = sdpBody.replaceAll(
+                "c=IN IP4 " + escapedCurrentIp,
+                "c=IN IP4 " + escapedFsPublicIp);
+        // 第二步: 替换 a=candidate 行中的连接地址(candidate 格式: a=candidate:<id> <component> <proto> <priority> <ip> <port> ...)
+        newSdpBody = newSdpBody.replaceAll(
+                "(a=candidate:\\S+ \\S+ \\S+ \\S+ )" + escapedCurrentIp,
+                "$1" + escapedFsPublicIp);
         try {
             message.setContent(newSdpBody, contentTypeHeader);
             log.info("[modifySdpForWebSocket][SDP替换完成] callId={}", callId);

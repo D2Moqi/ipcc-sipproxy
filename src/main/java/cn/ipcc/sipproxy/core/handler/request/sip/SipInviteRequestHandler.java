@@ -198,6 +198,20 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
                 }
                 log.info("[handleIncomingRequest][检测到FS源INVITE被叫为已注册JsSIP坐席,直接推送到WebSocket] callId={}, agentNumber={}, agentDomain={}",
                         callId, agentNumber, agentDomain);
+                // 关键: 将被叫坐席的 WebSocket sessionId 回写到 SessionInfo,
+                // 后续 ACK/BYE 等会话内请求从 FS 到达 sipproxy 时,需通过 sessionId 转发到 WebSocket
+                // (forwardToWebSocketByUser 内部通过 username+domain 查找 sessionId 但不回写 SessionInfo,
+                //  不回写会导致 ACK 转发时 sessionId=null,JsSIP 收不到 ACK 触发 No ACK 超时挂断)
+                String wsSessionId = sessionManager.getSessionIdByUser(agentNumber, agentDomain);
+                if (wsSessionId != null) {
+                    sessionInfo.setSessionId(wsSessionId);
+                    sessionManager.cacheSessionInfo(sessionInfo);
+                    log.info("[handleIncomingRequest][已回写WebSocket sessionId到SessionInfo] callId={}, sessionId={}",
+                            callId, wsSessionId);
+                } else {
+                    log.warn("[handleIncomingRequest][未找到坐席WebSocket会话,sessionId未回写] callId={}, agent={}@{}",
+                            callId, agentNumber, agentDomain);
+                }
                 messageForwarder.forwardToWebSocketByUser(agentNumber, agentDomain, request);
                 return;
             }

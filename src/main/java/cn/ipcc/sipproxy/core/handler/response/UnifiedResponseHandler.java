@@ -8,6 +8,7 @@ import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
+import javax.sip.header.ViaHeader;
 import javax.sip.message.Message;
 import javax.sip.message.Response;
 
@@ -34,6 +35,20 @@ public class UnifiedResponseHandler extends AbstractSipResponseHandler {
         //    特别是第三方网关也是 FreeSWITCH 部署时(UA 相同),会被误识别为 FREESWITCH
         String source = messageSourceIdentifier.identifySource(response);
 
+        // 1.5 Via transport 为 WS/WSS 时,来源一定是 WebSocket,跳过 SessionInfo 校正
+        //     需求背景: 被叫腿(1002→sipproxy)的 200 OK Via transport=WS,identifySource 正确返回 WEBSOCKET,
+        //     但 correctSourceBySessionContext 的"校正2"会因 hasFreeSwitch=true 将 WEBSOCKET 错误校正为 FREESWITCH,
+        //     导致 200 OK 被错误转发回 WebSocket 而非 FS,FS 收不到 200 OK → 不发 ACK → JsSIP No ACK 超时挂断。
+        //     修复: Via transport=WS/WSS 是可靠来源标识,不参与 SessionInfo 校正。
+        String viaTransport = extractTopViaTransport(response);
+        if ("WS".equalsIgnoreCase(viaTransport) || "WSS".equalsIgnoreCase(viaTransport)) {
+            String callType = sessionInfo.getCallType();
+            String target = forwardingStrategy.getForwardingTarget(SipProxyConstants.WEBSOCKET, callType);
+            log.info("[determineResponseTarget][Via transport={}, source=WEBSOCKET(确定,跳过校正), callType={}, target={}, callId={}]",
+                    viaTransport, callType, target, sessionInfo.getCallId());
+            return target;
+        }
+
         // 2. SessionInfo 上下文冲突校正（优先级高于 identifySource）
         //    场景: sipproxy 发起 INVITE 时已将目标节点存入 SessionInfo,
         //    因此 Response 的真实来源可以反向推断——"刚刚发给了谁,Response 就来自谁"。
@@ -46,6 +61,36 @@ public class UnifiedResponseHandler extends AbstractSipResponseHandler {
                 source, callType, target, sessionInfo.getCallId());
 
         return target;
+    }
+
+    /**
+     * 提取 Response 顶层 Via 头的 transport 字段
+     * <p>
+     * Via 头格式: SIP/2.0/TRANSPORT host:port;params
+     * transport 为 WS/WSS 时表示消息来自 WebSocket,为 UDP/TCP 时表示来自 FS 或第三方 SIP
+     *
+     * @param response SIP 响应
+     * @return transport 字符串(大写),提取失败返回 null
+     */
+    private String extractTopViaTransport(Response response) {
+        try {
+            ViaHeader viaHeader = (ViaHeader) response.getHeader(ViaHeader.NAME);
+            return viaHeader != null ? viaHeader.getTransport() : null;
+        } catch (Exception e) {
+            log.warn("[extractTopViaTransport][提取Via transport失败] callId={}", safeGetCallId(response));
+            return null;
+        }
+    }
+
+    /**
+     * 安全提取 Call-ID(内部工具方法,避免直接依赖 SipAnalysisUtil 的异常传播)
+     */
+    private String safeGetCallId(Response response) {
+        try {
+            return cn.ipcc.sipproxy.core.utils.SipAnalysisUtil.getCallId(response);
+        } catch (Exception e) {
+            return "unknown";
+        }
     }
 
     /**
