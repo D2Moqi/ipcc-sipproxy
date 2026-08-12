@@ -156,7 +156,7 @@ public class GatewayAuthManager {
                 return false;
             }
 
-            // 问题27修复: 407 重发 INVITE/ACK 的发送通道按出局网关自身协议
+            // 407 重发 INVITE/ACK 的发送通道按出局网关自身协议
             // (transport_protocol: 1=UDP, 2=TCP, 缺省 UDP)决定,与 FS 腿 transport 解耦,
             // 与 forwardToOutboundGateway 的取值同源(优先用会话缓存的网关节点,缺失时按 gatewayId 查询)
             GatewayInfo gwNode = sessionInfo.getThirdPartyNode();

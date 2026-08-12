@@ -101,7 +101,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             //   - FREESWITCH + 携带X-Gateway-Id → OUTBOUND(c-leg 出局腿,响应需回送FS)
             //   - FREESWITCH + 未携带X-Gateway-Id → INTERNAL(FS 内部回环,如REFER内部转接)
             //   - THIRD_PARTY → INBOUND(响应转发回第三方)
-            //   - WEBSOCKET + Via transport 非 WS/WSS(问题32: 原生 SIP 终端直连入局被兜底误判)
+            //   - WEBSOCKET + Via transport 非 WS/WSS(原生 SIP 终端直连入局被兜底误判)
             //     → 按 INBOUND 处理(响应沿入站 Via/入站连接回送)
             //   - 其他 → INTERNAL
             String callType;
@@ -112,7 +112,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
                 // FS 内部回环(未携带X-Gateway-Id,内部转接等场景)
                 callType = SipProxyConstants.CALL_TYPE_INTERNAL;
             } else if (SipProxyConstants.THIRD_PARTY.equals(source)
-                    // 问题32修复: 原生 SIP 终端(软电话/普通SIP终端)经 TCP/UDP 直连入局 INVITE,
+                    // 原生 SIP 终端(软电话/普通SIP终端)经 TCP/UDP 直连入局 INVITE,
                     // Via host 为 sipproxy 自身公网地址时 identifySource 各层均未命中,兜底返回 WEBSOCKET,
                     // 被误判为内部呼叫(callType=INTERNAL)后 FS 的 100/180/200 响应经
                     // (FREESWITCH,INTERNAL)→WEBSOCKET 映射转发到 WebSocket,而 sessionId 为 null
@@ -121,7 +121,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
                     // 因此 Via transport 非 WS/WSS 的 WEBSOCKET 来源即原生 SIP 直连,必须按第三方入局处理
                     || (SipProxyConstants.WEBSOCKET.equals(source) && !isWebSocketTransport(request))) {
                 // 第三方入局:按 INVITE 来源 IP 反查匹配的第三方网关节点并缓存(用于响应时回送),callType=INBOUND
-                // 来源 IP 未匹配网关列表时 thirdPartyNode 为 null,响应回送退化为按入站 Via/入站连接(问题32)
+                // 来源 IP 未匹配网关列表时 thirdPartyNode 为 null,响应回送退化为按入站 Via/入站连接
                 String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
                 GatewayInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
                 if (thirdPartyNode != null) {
@@ -154,12 +154,12 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
                         sessionInfo.setFreeSwitchNode(sourceFsNode);
                     }
                 }
-                // 问题23修复: 缓存 FS 出局 INVITE 原始顶层 Via(含 received/rport),
+                // 缓存 FS 出局 INVITE 原始顶层 Via(含 received/rport),
                 // 后续第三方网关的 200 OK/ringing/4xx 等响应回送 FS 时按该 Via 的 received:rport
                 // 准确投递回发起 originate 的 CC FS 实例端口(如 15580/16580),
                 // 避免响应被 modifyHeadersForForwarding 重建 Via 后投递去向异常导致 FS 408 超时
                 sessionInfo.setOutboundFsTopVia(extractTopViaBody(request));
-                // 问题30修复: 同步缓存 FS 出局 INVITE 原始 CSeq 序号。
+                // 同步缓存 FS 出局 INVITE 原始 CSeq 序号。
                 // 407 鉴权重发时 CSeq+1(RFC3261 §22.2 新事务必递增),网关对重发请求返回的
                 // 200 OK 携带递增 CSeq,回送 FS 前必须还原为原始值,否则 CC FS sofia 无法
                 // 关联事务丢弃 200 OK → 无 ACK → Timer B 超时 408
@@ -189,7 +189,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
         //   场景六: REFER 转接外部(携带 gw3)的 c-leg
         //   场景七: 自动外呼的 a-leg(FS 按预拨号计划外呼)
         if (SipProxyConstants.FREESWITCH.equals(source) && StrUtil.isNotBlank(gatewayId)) {
-            // 问题16环路防护：出局 INVITE 经 DefaultOutboundGatewayRewriter 注入 X-IPCC-Outbound 标记。
+            // 环路防护：出局 INVITE 经 DefaultOutboundGatewayRewriter 注入 X-IPCC-Outbound 标记。
             // 若第三方网关（B2BUA）未按改写后的 Request-URI 终结呼叫，而是把出局报文（含透传 X-头）
             // 路由回 proxy，会再次命中本豁免分支形成 INVITE 乒乓环路（多 callId 风暴）。
             // 检测到出局标记即判定为环路，拒绝再次出局（返回 482 Loop Detected）。
@@ -229,7 +229,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             if (split.length > 1) {
                 toDomain = URLUtil.decode(split[1]);
             }
-            // 关键修复: 坐席查询和 WebSocket 转发必须使用拆分后的纯坐席号(agentNumber),
+            // 关键: 坐席查询和 WebSocket 转发必须使用拆分后的纯坐席号(agentNumber),
             // 不能用完整 toUser(如 "1002&1.com:1"),否则数据库 name 字段匹配失败返回 null,
             // 且 Redis 会话 key(user:session:1002&1.com:1:domain)与注册 key(user:session:1002:domain)不一致,
             // 导致快速推送路径被跳过,呼叫回退到 FS park 形成死循环,坐席B永远收不到来电.
@@ -347,7 +347,7 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
     /**
      * 判断请求是否经 WebSocket 传输(Via transport 为 WS/WSS)
      * <p>
-     * 问题32: 原生 SIP 终端(TCP/UDP 直连)与 WebSocket 客户端来源均可能被 identifySource
+     * 原生 SIP 终端(TCP/UDP 直连)与 WebSocket 客户端来源均可能被 identifySource
      * 兜底识别为 WEBSOCKET,需按传输层区分——WebSocket 消息走 handleWebSocketSipMessage
      * 独立通道,JAIN-SIP processRequest 通道收到的请求 Via transport 必为 TCP/UDP,
      * 因此 transport 非 WS/WSS 时即为原生 SIP 直连,应按第三方入局(INBOUND)处理。

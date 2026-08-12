@@ -28,7 +28,7 @@ import javax.sip.message.Request;
  * <p>
  * 改写步骤：
  * <ol>
- *   <li>Request-URI 改写：改为 sip:被叫号@网关address（不带端口，与第三方 FS 注册域对齐，问题16环路+问题19本地投递）</li>
+ *   <li>Request-URI 改写：改为 sip:被叫号@网关address（不带端口，与第三方 FS 注册域对齐，避免环路且保障本地投递）</li>
  *   <li>Route 头注入：指向网关 address:port（含 transport），保障 Request-URI 去端口后的信令传输路由</li>
  *   <li>From 头改写：按 {@code callerIdInFrom} 决定主叫号码，按 {@code fromDomain} 或网关地址作为域名</li>
  *   <li>P-Asserted-Identity 注入：使用原始主叫号码，便于运营商透传真实主叫</li>
@@ -87,7 +87,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
         String callId = SipAnalysisUtil.getCallId(request);
         log.info("[rewrite][开始出局信令改写] callId={}, gatewayId={}", callId, gatewayInfo.getId());
 
-        // 问题16修复+问题19修复：将 Request-URI 改写为 sip:被叫号@网关address（不带端口）。
+        // 将 Request-URI 改写为 sip:被叫号@网关address（不带端口）。
         // 带端口的根因：若 Request-URI host 是 proxy 隧道地址，第三方网关（B2BUA）会按 Request-URI
         // 把呼叫路由回 proxy 形成 INVITE 乒乓环路；但带网关端口（如 @62.234.191.165:9988）时，
         // 第三方 FS 本地投递按注册域匹配（注册域为无端口 address），带端口 URI 无法命中已注册被叫，
@@ -107,7 +107,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
             log.error("[rewrite][改写Request-URI失败] callId={}", callId, e);
         }
 
-        // 问题19配套：注入 Route 头指向网关真实监听地址:端口（含 transport 参数）。
+        // 注入 Route 头指向网关真实监听地址:端口（含 transport 参数）。
         // JAIN-SIP 发送时按顶层 Route 头解析下一跳（优先于 Request-URI），
         // 保证 Request-URI 去端口后信令仍投递到网关实际监听端口（如 9988）。
         try {
@@ -126,7 +126,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
             log.error("[rewrite][注入Route头失败] callId={}", callId, e);
         }
 
-        // 问题16环路防护标记：出局报文注入 X-IPCC-Outbound 头（保留 X-头透传语义，不删除已有 X-头）。
+        // 环路防护标记：出局报文注入 X-IPCC-Outbound 头（保留 X-头透传语义，不删除已有 X-头）。
         // 第三方网关若将本出局报文（含透传的 X-头）路由回 proxy，入站方向 SipInviteRequestHandler
         // 检测到该标记即判定为环路，拒绝再次出局（返回 482 Loop Detected）。
         try {
@@ -153,7 +153,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
         // 改写 From 头
         if (fromNumber != null && !fromNumber.isEmpty()) {
             try {
-                // 问题30修复: 保留原始 From tag(dialog 标识关键部分)。
+                // 保留原始 From tag(dialog 标识关键部分)。
                 // From tag 由发起方(CC FS)UAC 生成,第三方网关回 200 OK 时原样回显;
                 // 若此处丢失,CC FS 按 RFC3261 §12.2(Call-ID+From tag+To tag)无法匹配
                 // dialog,sofia 丢弃 200 OK → 无 ACK → Timer B 超时 408
@@ -177,7 +177,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
                 SipURI paiUri = buildSipUri(originalCaller, fromDomain);
                 // 注意：必须使用 URI 的 toString（sip:user@host:port）再包一层尖括号；
                 // 若使用 Address.toString()，JAIN-SIP 对无 displayName 的 name-addr 已输出 <sip:...> 形式，
-                // 再包一层会产生 <<sip:...>> 导致 createHeader ParseException（回归修复）
+                // 再包一层会产生 <<sip:...>> 导致 createHeader ParseException
                 Header paiHeader = headerFactory.createHeader("P-Asserted-Identity",
                         "<" + paiUri.toString() + ">");
                 request.removeHeader("P-Asserted-Identity");

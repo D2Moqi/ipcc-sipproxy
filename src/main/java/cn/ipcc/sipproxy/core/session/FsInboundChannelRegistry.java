@@ -10,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * FS 入站连接注册表
  * <p>
- * 问题29修复: RFC 3261 §18.2.2 规定连接导向传输(TCP)的响应必须沿请求到达的同一连接回送。
+ * RFC 3261 §18.2.2 规定连接导向传输(TCP)的响应必须沿请求到达的同一连接回送。
  * 本环境 CC FS→代理的 TCP INVITE 经 nps 隧道进入(连接对端为 127.0.0.1 隧道出口),
  * 而响应若走 SipProvider.sendResponse 按 Via 路由会新建连接到 Via sent-by 公网地址,
  * 在隧道拓扑下该地址不可达 FS(且 cleanViaHeaderForTcpRequest 已剥离 received/rport,

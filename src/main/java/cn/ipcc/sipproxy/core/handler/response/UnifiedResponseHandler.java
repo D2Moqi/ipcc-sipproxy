@@ -34,7 +34,7 @@ public class UnifiedResponseHandler extends AbstractSipResponseHandler {
         //     需求背景: 被叫腿(1002→sipproxy)的 200 OK Via transport=WS,identifySource 正确返回 WEBSOCKET,
         //     但 correctSourceBySessionContext 的"校正2"会因 hasFreeSwitch=true 将 WEBSOCKET 错误校正为 FREESWITCH,
         //     导致 200 OK 被错误转发回 WebSocket 而非 FS,FS 收不到 200 OK → 不发 ACK → JsSIP No ACK 超时挂断。
-        //     修复: Via transport=WS/WSS 是可靠来源标识,不参与 SessionInfo 校正。
+        //     处理: Via transport=WS/WSS 是可靠来源标识,不参与 SessionInfo 校正。
         String viaTransport = extractTopViaTransport(response);
         if ("WS".equalsIgnoreCase(viaTransport) || "WSS".equalsIgnoreCase(viaTransport)) {
             String callType = sessionInfo.getCallType();
@@ -232,10 +232,10 @@ public class UnifiedResponseHandler extends AbstractSipResponseHandler {
             log.info("[forwardToThirdParty][转发响应到第三方SIP服务] node={}, callId={}",
                     sessionInfo.getThirdPartyNode().getName(), sessionInfo.getCallId());
         } else {
-            // 问题32修复: 原生 SIP 终端(TCP/UDP 直连,非坐席)入局 INVITE 的来源 IP 未匹配网关列表时,
+            // 原生 SIP 终端(TCP/UDP 直连,非坐席)入局 INVITE 的来源 IP 未匹配网关列表时,
             // thirdPartyNode 为 null,但响应仍需沿入站 Via/入站连接回送——forwardToThirdParty 的
-            // Response 分支依赖 inboundTopVia + 入站连接注册表(问题31修复),不依赖网关节点,
-            // 此处不再直接丢弃,传 null 节点继续回送
+            // Response 分支依赖 inboundTopVia + 入站连接注册表,不依赖网关节点,
+            // 此处不丢弃,传 null 节点继续回送
             messageForwarder.forwardToThirdParty(response, null);
             log.info("[forwardToThirdParty][无匹配第三方节点,响应按入站连接回送] callId={}", sessionInfo.getCallId());
         }

@@ -87,7 +87,7 @@ public class SipProxyService implements SipListener {
     private SipRateLimiter sipRateLimiter;
 
     /**
-     * 问题29修复: FS 入站连接注册表——INVITE 到达时按 callId 缓存入站 MessageChannel,
+     * FS 入站连接注册表——INVITE 到达时按 callId 缓存入站 MessageChannel,
      * 回送 FS 方向响应时优先沿该连接原路返回(RFC3261 §18.2.2 连接导向传输要求)
      */
     @Resource
@@ -188,7 +188,7 @@ public class SipProxyService implements SipListener {
         messageForwarder.setAddressFactory(addressFactory);
         messageForwarder.setLocalIpAddress(sipProxyProperties.getSip().getPublicIp());
         messageForwarder.setSipPort(sipProxyProperties.getSip().getPublicPort());
-        // 问题29残留回归修复: 注入协议栈,供无状态 sendResponse 被拒时按事务兜底发送
+        // 注入协议栈,供无状态 sendResponse 被拒时按事务兜底发送
         messageForwarder.setSipStack(sipStack);
 
         gatewayAuthManager.init(headerFactory, addressFactory, sipProvider, sipProviderTcp);
@@ -359,7 +359,7 @@ public class SipProxyService implements SipListener {
 
             String method = request.getMethod();
             String callId = SipAnalysisUtil.getCallId(request);
-            // 问题29修复: INVITE 到达时缓存入站连接,供后续响应沿同一 TCP 连接回送(隧道拓扑下
+            // INVITE 到达时缓存入站连接,供后续响应沿同一 TCP 连接回送(隧道拓扑下
             // 按 Via 新建连接不可达 FS,必须复用 FS 主动建立的入站连接原路返回)
             cacheInboundChannelForInvite(requestEvent, method, callId);
             log.info("[processRequest][收到 SIP 请求] method={}, callId={}, request={}", method, callId, request);
@@ -400,7 +400,7 @@ public class SipProxyService implements SipListener {
     }
 
     /**
-     * 问题29修复: 缓存 INVITE 入站连接
+     * 缓存 INVITE 入站连接
      * <p>
      * 背景: 环境实测 CC FS→代理的 TCP INVITE 经 nps 隧道进入(连接对端 127.0.0.1 隧道出口),
      * 且 cleanViaHeaderForTcpRequest 已剥离顶层 Via 的 received/rport,响应若走
@@ -408,7 +408,7 @@ public class SipProxyService implements SipListener {
      * RFC 3261 §18.2.2 要求连接导向传输的响应沿请求到达的同一连接回送,因此此处把
      * INVITE 的入站 MessageChannel 按 callId 注册,回送响应时优先复用。
      * <p>
-     * 提取顺序(问题29残留修复): 实测事件投递时 requestEvent.getServerTransaction() 为 null
+     * 提取顺序: 实测事件投递时 requestEvent.getServerTransaction() 为 null
      * 且 getSource() 是 SipProvider 而非 MessageChannel,原两路径均静默落空。现按三级提取:
      * ① 事件已关联事务则直接取 messageChannel;
      * ② 按消息从 SIPTransactionStack.findTransaction 查已存在事务(jain-sip-ri 1.2.1.4
@@ -441,7 +441,7 @@ public class SipProxyService implements SipListener {
                 // branch/transport 仅用于日志与准入判断,提取失败不影响主流程
             }
 
-            // 问题29残留回归修复: 注册仅对 TCP INVITE 生效。入站连接注册表的复用分支只在
+            // 注册仅对 TCP INVITE 生效。入站连接注册表的复用分支只在
             // TCP 响应回送时使用,UDP 呼叫无需注册;且路径③主动创建服务端事务会使后续
             // 无状态 sendResponse 被栈拒绝(Transaction exists -- cannot send response statelessly),
             // 限定 TCP 可避免影响 UDP 呼叫(如第三方网关 UDP 环回腿)的既有回送语义
@@ -497,7 +497,7 @@ public class SipProxyService implements SipListener {
                 log.info("[cacheInboundChannelForInvite][已注册INVITE入站连接,响应回送将优先复用] callId={}, branch={}, transport={}, peer={}:{}",
                         callId, branch, channel.getTransport(), channel.getPeerAddress(), channel.getPeerPort());
             } else {
-                // 问题29残留修复: 消除静默盲区——三级路径全部失败时打印各路径失败原因便于定位
+                // 消除静默盲区——三级路径全部失败时打印各路径失败原因便于定位
                 log.warn("[cacheInboundChannelForInvite][入站连接注册失败,响应将回退Via路由直发] callId={}, branch={}, 事件事务={}, 事件源类型={}, 栈查事务未命中或无channel",
                         callId, branch,
                         serverTransaction == null ? "null" : serverTransaction.getClass().getSimpleName(),

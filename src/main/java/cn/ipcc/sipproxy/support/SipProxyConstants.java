@@ -83,7 +83,7 @@ public interface SipProxyConstants {
     int STATUS_TOO_MANY_REQUESTS = 429;
 
     /**
-     * 出局标记头名（问题16环路防护）
+     * 出局标记头名（环路防护）
      * <p>
      * 出局 INVITE 经 DefaultOutboundGatewayRewriter 注入该头；若第三方网关将出局报文
      * （含透传的 X-头）路由回 proxy，入站方向检测到该标记即判定为 INVITE 环路，拒绝再次出局。
