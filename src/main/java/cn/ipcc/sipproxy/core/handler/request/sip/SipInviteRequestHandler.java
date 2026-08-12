@@ -101,6 +101,8 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             //   - FREESWITCH + 携带X-Gateway-Id → OUTBOUND(c-leg 出局腿,响应需回送FS)
             //   - FREESWITCH + 未携带X-Gateway-Id → INTERNAL(FS 内部回环,如REFER内部转接)
             //   - THIRD_PARTY → INBOUND(响应转发回第三方)
+            //   - WEBSOCKET + Via transport 非 WS/WSS(问题32: 原生 SIP 终端直连入局被兜底误判)
+            //     → 按 INBOUND 处理(响应沿入站 Via/入站连接回送)
             //   - 其他 → INTERNAL
             String callType;
             if (SipProxyConstants.FREESWITCH.equals(source) && StrUtil.isNotBlank(gatewayId)) {
@@ -109,13 +111,27 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             } else if (SipProxyConstants.FREESWITCH.equals(source)) {
                 // FS 内部回环(未携带X-Gateway-Id,内部转接等场景)
                 callType = SipProxyConstants.CALL_TYPE_INTERNAL;
-            } else if (SipProxyConstants.THIRD_PARTY.equals(source)) {
-                // 第三方网关入局:按 INVITE 来源 IP 反查匹配的第三方网关节点并缓存(用于响应时回送),callType=INBOUND
+            } else if (SipProxyConstants.THIRD_PARTY.equals(source)
+                    // 问题32修复: 原生 SIP 终端(软电话/普通SIP终端)经 TCP/UDP 直连入局 INVITE,
+                    // Via host 为 sipproxy 自身公网地址时 identifySource 各层均未命中,兜底返回 WEBSOCKET,
+                    // 被误判为内部呼叫(callType=INTERNAL)后 FS 的 100/180/200 响应经
+                    // (FREESWITCH,INTERNAL)→WEBSOCKET 映射转发到 WebSocket,而 sessionId 为 null
+                    // 全部丢弃,呼叫卡死。此类消息经 JAIN-SIP processRequest 通道到达
+                    // (WebSocket 消息走独立的 handleWebSocketSipMessage 通道,其 Via transport 必为 WS/WSS),
+                    // 因此 Via transport 非 WS/WSS 的 WEBSOCKET 来源即原生 SIP 直连,必须按第三方入局处理
+                    || (SipProxyConstants.WEBSOCKET.equals(source) && !isWebSocketTransport(request))) {
+                // 第三方入局:按 INVITE 来源 IP 反查匹配的第三方网关节点并缓存(用于响应时回送),callType=INBOUND
+                // 来源 IP 未匹配网关列表时 thirdPartyNode 为 null,响应回送退化为按入站 Via/入站连接(问题32)
                 String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
                 GatewayInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
                 if (thirdPartyNode != null) {
                     sessionInfo.setThirdPartyNode(thirdPartyNode);
                 }
+                // RFC3581: 缓存入局 INVITE 原始顶层 Via(含 received/rport),
+                // 后续 200 OK/ringing 等响应回送第三方主叫时按该 Via 的 received:rport 发送
+                // (rport 缺失时 JAIN-SIP 按 Via 规则自然回退 sent-by host:port),
+                // 不能按网关节点静态配置端口发送,否则 NAT/随机端口主叫收不到 200 → 408
+                sessionInfo.setInboundTopVia(extractTopViaBody(request));
                 callType = SipProxyConstants.CALL_TYPE_INBOUND;
             } else {
                 // 其他来源默认按内部呼叫处理
@@ -125,6 +141,32 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             FsNodeInfo freeSwitchNode = nodeManager.selectFreeSwitchNode(callId);
             if (freeSwitchNode != null) {
                 sessionInfo.setFreeSwitchNode(freeSwitchNode);
+            }
+            // 关键: FS 来源 INVITE(含 CC FS 自动外呼出局腿)按 Via 端口识别发起 originate 的 FS 实例,
+            // 覆盖 hash 选择的 freeSwitchNode。多 FS 实例共用公网 IP 时 hash 可能选错节点,
+            // 导致出局腿 200 OK 经 (THIRD_PARTY,OUTBOUND)→WEBSOCKET→FS 链路回送到错误 FS,
+            // originate 腿永远收不到应答
+            if (SipProxyConstants.FREESWITCH.equals(source)) {
+                javax.sip.header.ViaHeader inviteVia = (javax.sip.header.ViaHeader) request.getHeader(javax.sip.header.ViaHeader.NAME);
+                if (inviteVia != null) {
+                    FsNodeInfo sourceFsNode = nodeManager.selectFreeSwitchNodeByViaPort(callId, inviteVia.getPort());
+                    if (sourceFsNode != null) {
+                        sessionInfo.setFreeSwitchNode(sourceFsNode);
+                    }
+                }
+                // 问题23修复: 缓存 FS 出局 INVITE 原始顶层 Via(含 received/rport),
+                // 后续第三方网关的 200 OK/ringing/4xx 等响应回送 FS 时按该 Via 的 received:rport
+                // 准确投递回发起 originate 的 CC FS 实例端口(如 15580/16580),
+                // 避免响应被 modifyHeadersForForwarding 重建 Via 后投递去向异常导致 FS 408 超时
+                sessionInfo.setOutboundFsTopVia(extractTopViaBody(request));
+                // 问题30修复: 同步缓存 FS 出局 INVITE 原始 CSeq 序号。
+                // 407 鉴权重发时 CSeq+1(RFC3261 §22.2 新事务必递增),网关对重发请求返回的
+                // 200 OK 携带递增 CSeq,回送 FS 前必须还原为原始值,否则 CC FS sofia 无法
+                // 关联事务丢弃 200 OK → 无 ACK → Timer B 超时 408
+                javax.sip.header.CSeqHeader inviteCSeq = (javax.sip.header.CSeqHeader) request.getHeader(javax.sip.header.CSeqHeader.NAME);
+                if (inviteCSeq != null) {
+                    sessionInfo.setOutboundFsCSeq(inviteCSeq.getSeqNumber());
+                }
             }
             // 保存X-Gateway-Id到SessionInfo(作为后续IVR转接节点的网关覆盖项)
             if (gatewayId != null) {
@@ -147,6 +189,16 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
         //   场景六: REFER 转接外部(携带 gw3)的 c-leg
         //   场景七: 自动外呼的 a-leg(FS 按预拨号计划外呼)
         if (SipProxyConstants.FREESWITCH.equals(source) && StrUtil.isNotBlank(gatewayId)) {
+            // 问题16环路防护：出局 INVITE 经 DefaultOutboundGatewayRewriter 注入 X-IPCC-Outbound 标记。
+            // 若第三方网关（B2BUA）未按改写后的 Request-URI 终结呼叫，而是把出局报文（含透传 X-头）
+            // 路由回 proxy，会再次命中本豁免分支形成 INVITE 乒乓环路（多 callId 风暴）。
+            // 检测到出局标记即判定为环路，拒绝再次出局（返回 482 Loop Detected）。
+            if (request.getHeader(SipProxyConstants.HEADER_OUTBOUND_MARK) != null) {
+                log.error("[handleIncomingRequest][检测到出局环路:INVITE携带X-IPCC-Outbound标记被路由回proxy,拒绝再次出局] callId={}, gatewayId={}",
+                        callId, gatewayId);
+                sendErrorResponse(callId, request, Response.LOOP_DETECTED);
+                return;
+            }
             log.info("[handleIncomingRequest][检测到FS c-leg携带X-Gateway-Id,直接出局] callId={}, gatewayId={}",
                     callId, gatewayId);
             messageForwarder.forwardToOutboundGateway(request, gatewayId);
@@ -264,7 +316,61 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
     }
 
     /**
-     * 从SIP请求头中提取X-Gateway-Id
+     * 提取请求顶层 Via 头的值部分(不含 "Via: " 名称前缀)
+     *
+     * 需求: 入局第三方 INVITE 建会话时缓存原始顶层 Via,供后续响应按 RFC3581 回送
+     * 预期结果: 返回形如 "SIP/2.0/UDP 127.0.0.1:61199;rport=61199;received=127.0.0.1;branch=..." 的 Via 值;
+     *          无 Via 头或解析异常时返回 null(消费方回退原有静态网关节点逻辑)
+     * 处理逻辑: JAIN-SIP getHeader(Via) 返回顶层(第一个) Via;
+     *          Header.toString() 格式为 "Via: 值",截去名称前缀后保留值原文
+     *
+     * @param request SIP 请求
+     * @return 顶层 Via 值文本,不存在时返回 null
+     */
+    private String extractTopViaBody(Request request) {
+        try {
+            Header viaHeader = request.getHeader(javax.sip.header.ViaHeader.NAME);
+            if (viaHeader == null) {
+                return null;
+            }
+            String viaStr = viaHeader.toString().trim();
+            if (viaStr.regionMatches(true, 0, "Via:", 0, 4)) {
+                return viaStr.substring(4).trim();
+            }
+            return viaStr;
+        } catch (Exception e) {
+            log.warn("[extractTopViaBody][提取顶层Via头异常]", e);
+            return null;
+        }
+    }
+    
+    /**
+     * 判断请求是否经 WebSocket 传输(Via transport 为 WS/WSS)
+     * <p>
+     * 问题32: 原生 SIP 终端(TCP/UDP 直连)与 WebSocket 客户端来源均可能被 identifySource
+     * 兜底识别为 WEBSOCKET,需按传输层区分——WebSocket 消息走 handleWebSocketSipMessage
+     * 独立通道,JAIN-SIP processRequest 通道收到的请求 Via transport 必为 TCP/UDP,
+     * 因此 transport 非 WS/WSS 时即为原生 SIP 直连,应按第三方入局(INBOUND)处理。
+     *
+     * @param request SIP 请求
+     * @return true=Via transport 为 WS/WSS
+     */
+    private boolean isWebSocketTransport(Request request) {
+        try {
+            javax.sip.header.ViaHeader via = (javax.sip.header.ViaHeader) request.getHeader(javax.sip.header.ViaHeader.NAME);
+            if (via == null) {
+                return false;
+            }
+            String transport = via.getTransport();
+            return "WS".equalsIgnoreCase(transport) || "WSS".equalsIgnoreCase(transport);
+        } catch (Exception e) {
+            log.warn("[isWebSocketTransport][解析Via transport异常,按非WebSocket处理] callId={}", e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 从 SIP 请求头中提取X-Gateway-Id
      *
      * 需求: FS回注INVITE可能携带X-Gateway-Id自定义头域,用于标识出局呼叫的目标网关
      * 预期结果: 如果请求中存在X-Gateway-Id头域,返回其值;否则返回null

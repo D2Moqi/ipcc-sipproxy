@@ -12,6 +12,7 @@ import cn.ipcc.sipproxy.core.handler.request.ws.AbstractWsSipRequestHandler;
 import cn.ipcc.sipproxy.core.handler.request.ws.WsSipRequestHandlerFactory;
 import cn.ipcc.sipproxy.core.handler.response.AbstractSipResponseHandler;
 import cn.ipcc.sipproxy.core.handler.response.SipResponseHandlerFactory;
+import cn.ipcc.sipproxy.core.session.FsInboundChannelRegistry;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.session.SipSessionManager;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
@@ -84,6 +85,13 @@ public class SipProxyService implements SipListener {
 
     @Resource
     private SipRateLimiter sipRateLimiter;
+
+    /**
+     * 问题29修复: FS 入站连接注册表——INVITE 到达时按 callId 缓存入站 MessageChannel,
+     * 回送 FS 方向响应时优先沿该连接原路返回(RFC3261 §18.2.2 连接导向传输要求)
+     */
+    @Resource
+    private FsInboundChannelRegistry inboundChannelRegistry;
 
     /** JAIN-SIP 协议栈实例 */
     private SipStack sipStack;
@@ -180,6 +188,8 @@ public class SipProxyService implements SipListener {
         messageForwarder.setAddressFactory(addressFactory);
         messageForwarder.setLocalIpAddress(sipProxyProperties.getSip().getPublicIp());
         messageForwarder.setSipPort(sipProxyProperties.getSip().getPublicPort());
+        // 问题29残留回归修复: 注入协议栈,供无状态 sendResponse 被拒时按事务兜底发送
+        messageForwarder.setSipStack(sipStack);
 
         gatewayAuthManager.init(headerFactory, addressFactory, sipProvider, sipProviderTcp);
     }
@@ -349,6 +359,9 @@ public class SipProxyService implements SipListener {
 
             String method = request.getMethod();
             String callId = SipAnalysisUtil.getCallId(request);
+            // 问题29修复: INVITE 到达时缓存入站连接,供后续响应沿同一 TCP 连接回送(隧道拓扑下
+            // 按 Via 新建连接不可达 FS,必须复用 FS 主动建立的入站连接原路返回)
+            cacheInboundChannelForInvite(requestEvent, method, callId);
             log.info("[processRequest][收到 SIP 请求] method={}, callId={}, request={}", method, callId, request);
 
             // 委托 MessageSourceIdentifier 扩展点识别消息来源
@@ -383,6 +396,115 @@ public class SipProxyService implements SipListener {
             }
         } catch (Exception e) {
             log.error("[processRequest][处理 SIP 请求失败]", e);
+        }
+    }
+
+    /**
+     * 问题29修复: 缓存 INVITE 入站连接
+     * <p>
+     * 背景: 环境实测 CC FS→代理的 TCP INVITE 经 nps 隧道进入(连接对端 127.0.0.1 隧道出口),
+     * 且 cleanViaHeaderForTcpRequest 已剥离顶层 Via 的 received/rport,响应若走
+     * SipProvider.sendResponse 按 Via sent-by 路由只能新建公网连接(隧道拓扑下不可达 FS)。
+     * RFC 3261 §18.2.2 要求连接导向传输的响应沿请求到达的同一连接回送,因此此处把
+     * INVITE 的入站 MessageChannel 按 callId 注册,回送响应时优先复用。
+     * <p>
+     * 提取顺序(问题29残留修复): 实测事件投递时 requestEvent.getServerTransaction() 为 null
+     * 且 getSource() 是 SipProvider 而非 MessageChannel,原两路径均静默落空。现按三级提取:
+     * ① 事件已关联事务则直接取 messageChannel;
+     * ② 按消息从 SIPTransactionStack.findTransaction 查已存在事务(jain-sip-ri 1.2.1.4
+     *    老包布局仅支持按 SIPMessage 查找);
+     * ③ 均取不到时主动 getNewServerTransaction 创建服务端事务再取其 messageChannel
+     *    (项目内无其他地方为 INVITE 创建事务,TransactionAlreadyExistsException 时回退再查一次;
+     *    与 sendErrorResponse 的既有模式一致,创建事务同时让栈按 RFC3261 处理 INVITE 重传)。
+     * 三级均失败时记 WARN(含 callId/branch/各路径失败原因),消除静默盲区;异常不影响请求处理。
+     *
+     * @param requestEvent JAIN-SIP 请求事件
+     * @param method       SIP 方法名
+     * @param callId       Call-ID
+     */
+    private void cacheInboundChannelForInvite(RequestEvent requestEvent, String method, String callId) {
+        try {
+            if (!Request.INVITE.equals(method) || callId == null) {
+                return;
+            }
+            Request request = requestEvent.getRequest();
+            // 顶层 Via branch 与传输协议(branch 仅用于失败日志定位,jain-sip-ri 1.2.1.4 无按 branch 字符串查事务的 API)
+            String branch = null;
+            String viaTransport = null;
+            try {
+                ViaHeader topVia = (ViaHeader) request.getHeader(ViaHeader.NAME);
+                if (topVia != null) {
+                    branch = topVia.getBranch();
+                    viaTransport = topVia.getTransport();
+                }
+            } catch (Exception ignore) {
+                // branch/transport 仅用于日志与准入判断,提取失败不影响主流程
+            }
+
+            // 问题29残留回归修复: 注册仅对 TCP INVITE 生效。入站连接注册表的复用分支只在
+            // TCP 响应回送时使用,UDP 呼叫无需注册;且路径③主动创建服务端事务会使后续
+            // 无状态 sendResponse 被栈拒绝(Transaction exists -- cannot send response statelessly),
+            // 限定 TCP 可避免影响 UDP 呼叫(如第三方网关 UDP 环回腿)的既有回送语义
+            if (!SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(viaTransport)) {
+                return;
+            }
+
+            // 路径①: 事件已关联 ServerTransaction,直接取其入站连接
+            gov.nist.javax.sip.stack.MessageChannel channel = null;
+            ServerTransaction serverTransaction = requestEvent.getServerTransaction();
+            if (serverTransaction instanceof gov.nist.javax.sip.stack.SIPTransaction sipTransaction) {
+                channel = sipTransaction.getMessageChannel();
+            }
+
+            // 路径②: 按消息从栈内查找已存在的服务端事务(重传 INVITE 命中已建事务场景)
+            if (channel == null) {
+                try {
+                    gov.nist.javax.sip.stack.SIPTransaction found =
+                            ((gov.nist.javax.sip.stack.SIPTransactionStack) sipStack)
+                                    .findTransaction((gov.nist.javax.sip.message.SIPMessage) request, true);
+                    if (found != null) {
+                        channel = found.getMessageChannel();
+                    }
+                } catch (Exception e) {
+                    log.warn("[cacheInboundChannelForInvite][按消息查事务失败,继续兜底创建] callId={}, branch={}", callId, branch, e);
+                }
+            }
+
+            // 路径③兜底: 主动创建服务端事务并取其入站连接(幂等: 事务已存在则回退再查一次)
+            if (channel == null && requestEvent.getSource() instanceof SipProvider eventProvider) {
+                try {
+                    ServerTransaction newTx = eventProvider.getNewServerTransaction(request);
+                    if (newTx instanceof gov.nist.javax.sip.stack.SIPTransaction sipTransaction) {
+                        channel = sipTransaction.getMessageChannel();
+                    }
+                } catch (javax.sip.TransactionAlreadyExistsException exists) {
+                    // 事务已被栈内创建(幂等兜底): 回退再查一次取连接
+                    try {
+                        gov.nist.javax.sip.stack.SIPTransaction found =
+                                ((gov.nist.javax.sip.stack.SIPTransactionStack) sipStack)
+                                        .findTransaction((gov.nist.javax.sip.message.SIPMessage) request, true);
+                        if (found != null) {
+                            channel = found.getMessageChannel();
+                        }
+                    } catch (Exception ignore) {
+                        // 兜底查询失败交由下方 WARN 记录
+                    }
+                }
+            }
+
+            if (channel != null) {
+                inboundChannelRegistry.register(callId, channel);
+                log.info("[cacheInboundChannelForInvite][已注册INVITE入站连接,响应回送将优先复用] callId={}, branch={}, transport={}, peer={}:{}",
+                        callId, branch, channel.getTransport(), channel.getPeerAddress(), channel.getPeerPort());
+            } else {
+                // 问题29残留修复: 消除静默盲区——三级路径全部失败时打印各路径失败原因便于定位
+                log.warn("[cacheInboundChannelForInvite][入站连接注册失败,响应将回退Via路由直发] callId={}, branch={}, 事件事务={}, 事件源类型={}, 栈查事务未命中或无channel",
+                        callId, branch,
+                        serverTransaction == null ? "null" : serverTransaction.getClass().getSimpleName(),
+                        requestEvent.getSource() == null ? "null" : requestEvent.getSource().getClass().getName());
+            }
+        } catch (Exception e) {
+            log.warn("[cacheInboundChannelForInvite][缓存入站连接失败,不影响请求处理] callId={}", callId, e);
         }
     }
 

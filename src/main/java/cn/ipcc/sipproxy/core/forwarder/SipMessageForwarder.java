@@ -6,6 +6,7 @@ import cn.ipcc.sipproxy.api.media.SdpProcessor;
 import cn.ipcc.sipproxy.autoconfigure.SipProxyProperties;
 import cn.ipcc.sipproxy.core.auth.GatewayAuthManager;
 import cn.ipcc.sipproxy.core.node.SipNodeManager;
+import cn.ipcc.sipproxy.core.session.FsInboundChannelRegistry;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.session.SipSessionManager;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
@@ -63,6 +64,12 @@ public class SipMessageForwarder {
     @Resource
     private GatewayAuthManager gatewayAuthManager;
 
+    /**
+     * 问题29修复: FS 入站连接注册表(INVITE 到达时缓存的入站 MessageChannel)
+     */
+    @Resource
+    private FsInboundChannelRegistry inboundChannelRegistry;
+
     @Resource
     private OutboundGatewayRewriter outboundGatewayRewriter;
 
@@ -84,6 +91,12 @@ public class SipMessageForwarder {
     private String localIpAddress;
     @Setter
     private int sipPort;
+    /**
+     * 问题29残留回归修复: JAIN-SIP 协议栈实例(用于无状态 sendResponse 被栈拒绝时
+     * 按消息查找服务端事务并回退事务发送)
+     */
+    @Setter
+    private javax.sip.SipStack sipStack;
 
     /**
      * 转发 SIP 消息到 WebSocket 客户端
@@ -116,6 +129,101 @@ public class SipMessageForwarder {
 
         log.info("[forwardToFreeSwitch][开始转发消息到FreeSWITCH] fs={}:{}, callId={}",
                 node.getSipIp(), node.getSipPort(), callId);
+
+        // 问题23修复: 出局方向(第三方网关→FS)的响应必须按 RFC3581 发往原始 FS 出局 INVITE
+        // 顶层 Via 的 received:rport(即发起 originate 的 CC FS 实例实际发送端口,如 15580/16580)。
+        // 此前走 modifyHeadersForForwarding 的 Response 分支会删除整个 Via 栈重建单条 Via
+        // (无 received/rport,仅含空值 setRPort()),JAIN-SIP sendResponse 按 Via 路由导致
+        // 投递去向异常,CC FS 收不到任何响应(200 OK/500 均丢),持续重传 INVITE 直至 Timer B 超时 408。
+        // 参照入局响应(问题4b)的还原思路: 用会话缓存的 FS 出局原始顶层 Via 重建 Via 后直接发送,
+        // 不走 modifyHeadersForForwarding(不影响入局响应路径与 407/ACK 请求路径)
+        if (message instanceof Response response) {
+            SessionInfo responseSession = sessionManager.getSessionInfo(callId);
+            String fsTopVia = responseSession != null ? responseSession.getOutboundFsTopVia() : null;
+            if (fsTopVia != null && !fsTopVia.isEmpty()) {
+                try {
+                    ViaHeader restoredVia = (ViaHeader) headerFactory.createHeader(ViaHeader.NAME, fsTopVia);
+
+                    // 问题25修复: FS→代理的 INVITE 经隧道进来时顶层 Via 被服务端打上
+                    // received=127.0.0.1(本机回环地址)。若保留 received:rport,JAIN-SIP 按 RFC3581
+                    // 把响应投递到 127.0.0.1:rport(loopback),远端 FS 永远收不到 → Timer B 408。
+                    // 此时剔除 received/rport 参数,让 JAIN-SIP 按 Via sent-by(即 FS 公网地址:端口,
+                    // 与会话目标 FS 节点一致)投递。仅对 UDP 生效: TCP 方向当前已验证通过
+                    // (JAIN-SIP 复用入局持久连接回送),保持原 Via 不引入回归
+                    String received = restoredVia.getReceived();
+                    boolean receivedIsLocal = received != null
+                            && ("127.0.0.1".equals(received) || "::1".equals(received)
+                                || "localhost".equalsIgnoreCase(received) || received.equals(localIpAddress));
+                    if (receivedIsLocal && SipProxyConstants.TRANSPORT_UDP.equalsIgnoreCase(restoredVia.getTransport())) {
+                        restoredVia.removeParameter("received");
+                        restoredVia.removeParameter("rport");
+                        log.info("[forwardToFreeSwitch][received为本机回环地址,剔除received/rport改按Via sent-by投递] callId={}, 原始via={}, 处理后via={}, 投递目标={}:{}",
+                                callId, fsTopVia, restoredVia, restoredVia.getHost(), restoredVia.getPort());
+                    }
+
+                    response.removeHeader(ViaHeader.NAME);
+                    response.addHeader(restoredVia);
+
+                    // 问题30修复: 407 鉴权重发时 CSeq+1(RFC3261 §22.2 新事务必递增),
+                    // 网关对重发请求的 200 OK 携带递增后的 CSeq(如 118629022),
+                    // 而 CC FS 自身 INVITE 的 CSeq 是原始值(如 118629021),不还原则 sofia
+                    // 无法关联事务,丢弃 200 OK → 无 ACK → Timer B 超时 408。
+                    // 还原仅影响回送 FS 方向,不改变已发往网关方向的事务状态;
+                    // 仅 OUTBOUND/INTERNAL(FS 来源)场景有缓存值,INBOUND 场景自动跳过
+                    javax.sip.header.CSeqHeader respCSeq = (javax.sip.header.CSeqHeader) response.getHeader(javax.sip.header.CSeqHeader.NAME);
+                    Long fsCSeq = responseSession.getOutboundFsCSeq();
+                    if (respCSeq != null && fsCSeq != null && respCSeq.getSeqNumber() != fsCSeq) {
+                        log.info("[forwardToFreeSwitch][还原FS出局原始CSeq] callId={}, statusCode={}, 网关侧CSeq={}, 还原为={}",
+                                callId, response.getStatusCode(), respCSeq.getSeqNumber(), fsCSeq);
+                        respCSeq.setSeqNumber(fsCSeq);
+                    }
+
+                    // 问题24修复: ws 坐席腿响应的 Contact 是 JsSIP 真实地址(如 sip:1001@公网IP:随机端口;transport=ws),
+                    // 直发路径绕过了 modifyHeadersForForwarding 导致未改写,FS 无法向 ws transport 路由 ACK。
+                    // 此处条件改写为代理监听地址(仅限回送 FS 方向),普通第三方/FS 响应 Contact 保持原样
+                    rewriteWsAgentContactForFs(response, restoredVia, callId);
+
+                    // 问题29修复: TCP 腿响应必须沿请求到达的同一连接回送(RFC3261 §18.2.2)。
+                    // 实测环境: FS→代理的 TCP INVITE 经 nps 隧道进入,且 cleanViaHeaderForTcpRequest
+                    // 已剥离 Via 的 received/rport, sipProviderTcp.sendResponse 按 Via sent-by 只能
+                    // 新建公网连接(隧道拓扑下不可达 FS,响应重传直至 FS 腿 408)。
+                    // 优先用 INVITE 到达时缓存的入站 MessageChannel 直接回送(隧道出口→隧道→FS 原路返回),
+                    // 复用失败/未缓存时回退下方 Via 路由直发逻辑。仅对 TCP 生效,UDP 保持现状不引入回归
+                    if (SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(restoredVia.getTransport())) {
+                        gov.nist.javax.sip.stack.MessageChannel inboundChannel = inboundChannelRegistry.get(callId);
+                        if (inboundChannel != null) {
+                            try {
+                                log.info("[forwardToFreeSwitch][复用INVITE入站连接回送响应(RFC3261 §18.2.2)] callId={}, statusCode={}, 复用连接=true, channelTransport={}, channelPeer={}:{}",
+                                        callId, response.getStatusCode(), inboundChannel.getTransport(),
+                                        inboundChannel.getPeerAddress(), inboundChannel.getPeerPort());
+                                // jain-sip-ri 1.2.1.4 的 MessageChannel 无 sendResponse 方法,
+                                // 用 sendMessage(SIPMessage) 沿同一连接直发(RI 解析的响应实例即 SIPResponse)
+                                inboundChannel.sendMessage((gov.nist.javax.sip.message.SIPMessage) response);
+                                log.info("[forwardToFreeSwitch][响应经入站连接回送成功] callId={}, statusCode={}",
+                                        callId, response.getStatusCode());
+                                return;
+                            } catch (Exception e) {
+                                log.warn("[forwardToFreeSwitch][复用入站连接回送失败,回退Via路由直发] callId={}, statusCode={}",
+                                        callId, response.getStatusCode(), e);
+                            }
+                        } else {
+                            log.info("[forwardToFreeSwitch][未缓存INVITE入站连接,回退Via路由直发] callId={}, statusCode={}, 复用连接=false",
+                                    callId, response.getStatusCode());
+                        }
+                    }
+
+                    log.info("[forwardToFreeSwitch][响应按FS出局原始Via回送(RFC3581)] callId={}, statusCode={}, 最终via={}, 投递目标fs={}:{}",
+                            callId, response.getStatusCode(), restoredVia, node.getSipIp(), node.getSipPort());
+                    doForwardToFreeSwitch(response, node);
+                    return;
+                } catch (Exception e) {
+                    // 还原失败时回退默认转发逻辑(重建 Via),不阻断响应回送
+                    log.warn("[forwardToFreeSwitch][还原FS出局原始Via失败,回退默认转发逻辑] callId={}, via={}",
+                            callId, fsTopVia, e);
+                }
+            }
+        }
+
         List<FsNodeInfo> triedNodes = new ArrayList<>();
         FsNodeInfo currentNode = node;
         while (true) {
@@ -155,6 +263,62 @@ public class SipMessageForwarder {
     }
 
     /**
+     * 问题24修复: 回送 FS 方向的响应 Contact 条件改写
+     * <p>
+     * ws 坐席腿(JsSIP)响应的 Contact 是坐席浏览器真实地址(如 sip:1001@公网IP:随机端口;transport=ws),
+     * FS 无法向 ws transport 路由 ACK/BYE(代理全程零 ACK → 200 重传 → 前端 SIP 栈拆线 487)。
+     * 当 Contact transport 为 ws/wss(或地址与会话记录的 WebSocket 坐席地址一致)时,
+     * 改写为代理监听地址 sip:user@代理IP:代理SIP端口;transport=FS侧协议(取还原 Via 的 transport,
+     * 保证 FS 按其原出局腿协议路由后续请求);改写逻辑参照 modifyWsProxyHeaders 的 Contact 构造方式。
+     * 普通第三方/FS 响应的 Contact 保持原样,异常仅记日志不阻断响应回送。
+     *
+     * @param response 回送 FS 的响应
+     * @param fsVia    还原后的 FS 出局顶层 Via(用于确定改写后 Contact 的 transport)
+     * @param callId   会话 Call-ID
+     */
+    private void rewriteWsAgentContactForFs(Response response, ViaHeader fsVia, String callId) {
+        try {
+            ContactHeader contactHeader = (ContactHeader) response.getHeader(ContactHeader.NAME);
+            if (contactHeader == null) {
+                return;
+            }
+            URI contactUri = contactHeader.getAddress().getURI();
+            if (!(contactUri instanceof SipURI contactSipUri)) {
+                return;
+            }
+            // 条件判定: Contact transport 为 ws/wss,或地址与会话缓存的 WebSocket 坐席地址一致
+            String contactTransport = contactSipUri.getTransportParam();
+            boolean isWsContact = "ws".equalsIgnoreCase(contactTransport) || "wss".equalsIgnoreCase(contactTransport);
+            if (!isWsContact) {
+                SessionInfo session = sessionManager.getSessionInfo(callId);
+                if (session != null && session.getWebsocketContactIp() != null
+                        && session.getWebsocketContactIp().equals(contactSipUri.getHost())) {
+                    isWsContact = true;
+                }
+            }
+            if (!isWsContact) {
+                return;
+            }
+            // 改写后 Contact 的 transport 取 FS 出局腿协议(还原 Via 的 transport),缺省 UDP;规范化小写
+            String fsTransport = (fsVia != null && fsVia.getTransport() != null)
+                    ? fsVia.getTransport().toLowerCase() : SipProxyConstants.TRANSPORT_UDP;
+            String before = contactHeader.toString();
+            SipURI newContactUri = addressFactory.createSipURI(contactSipUri.getUser(), localIpAddress);
+            newContactUri.setPort(sipPort);
+            newContactUri.setParameter(SipProxyConstants.TRANSPORT_PARAM, fsTransport);
+            ContactHeader newContactHeader = headerFactory.createContactHeader(
+                    addressFactory.createAddress(newContactUri));
+            response.removeHeader(ContactHeader.NAME);
+            response.addHeader(newContactHeader);
+            log.info("[forwardToFreeSwitch][ws坐席响应Contact改写为代理可达地址] callId={}, 改写前={}, 改写后={}",
+                    callId, before, newContactHeader);
+        } catch (Exception e) {
+            // 改写失败保留原始 Contact,不阻断响应回送 FS
+            log.warn("[forwardToFreeSwitch][ws坐席响应Contact改写失败,保留原始Contact] callId={}", callId, e);
+        }
+    }
+
+    /**
      * 实际的FreeSWITCH转发逻辑（无故障转移）
      *
      * @param message SIP消息
@@ -189,7 +353,15 @@ public class SipMessageForwarder {
             } else if (message instanceof Response response) {
                 log.info("[doForwardToFreeSwitch][响应发送到FreeSWITCH] statusCode={}, fs={}:{}",
                         response.getStatusCode(), node.getSipIp(), node.getSipPort());
-                targetProvider.sendResponse(response);
+                try {
+                    targetProvider.sendResponse(response);
+                } catch (Exception sendError) {
+                    // 问题29残留回归修复: INVITE 注册入站连接时已建服务端事务,无状态 sendResponse
+                    // 被栈拒绝时回退按事务发送(详见 trySendResponseViaTransaction)
+                    if (!trySendResponseViaTransaction(response, callId)) {
+                        throw sendError;
+                    }
+                }
                 log.info("[doForwardToFreeSwitch][响应已发送到FreeSWITCH]");
             }
         } catch (Exception e) {
@@ -201,8 +373,11 @@ public class SipMessageForwarder {
     }
 
     public void forwardToThirdParty(Message message, GatewayInfo node) throws Exception {
+        // node 可能为 null(问题32: 原生 SIP 终端直连入局且来源 IP 未匹配网关列表时,
+        // 响应回送依赖 inboundTopVia + 入站连接注册表,不依赖网关节点;请求类消息仍必须指定节点)
         log.info("[forwardToThirdParty][开始转发消息到第三方SIP服务] tp={}:{}, message={}",
-                node.getAddress(), node.getPort(), message.getClass().getSimpleName());
+                node != null ? node.getAddress() : "inbound(入站连接)",
+                node != null ? node.getPort() : null, message.getClass().getSimpleName());
 
         String callId = SipAnalysisUtil.getCallId(message);
         String transport = SipProxyConstants.TRANSPORT_UDP;
@@ -217,6 +392,60 @@ public class SipMessageForwarder {
         log.info("[forwardToThirdParty][选择传输协议] transport={}", transport);
 
         try {
+            if (message instanceof Response response) {
+                // RFC3581: 响应回送第三方主叫必须发往原始入局 INVITE 顶层 Via 的 received:rport
+                // (rport 缺失时 JAIN-SIP 按 Via 规则自然回退 sent-by host:port)。
+                // 此前响应复用 modifyHeadersForForwarding 按第三方网关节点静态配置 address:port
+                // 重写顶层 Via 发送,软电话等随机端口主叫(NAT 后 rport≠静态端口)收不到 200 OK,
+                // 持续重传 INVITE 直至 408。改为还原会话缓存的入局原始顶层 Via 后直接发送,
+                // 响应不做 Request-URI/Contact 改写(响应无 Request-URI,Contact 保持原样回送)
+                SessionInfo responseSession = callId != null ? sessionManager.getSessionInfo(callId) : null;
+                String inboundTopVia = responseSession != null ? responseSession.getInboundTopVia() : null;
+                if (inboundTopVia != null && !inboundTopVia.isEmpty()) {
+                    try {
+                        Header inboundVia = headerFactory.createHeader(ViaHeader.NAME, inboundTopVia);
+                        response.removeHeader(ViaHeader.NAME);
+                        response.addHeader(inboundVia);
+                        log.info("[forwardToThirdParty][响应按入局原始Via回送(RFC3581 received:rport)] callId={}, via={}",
+                                callId, inboundTopVia);
+                    } catch (Exception e) {
+                        // 还原失败时保留响应当前顶层 Via(JAIN-SIP 仍按其 received:rport 发送),不阻断回送
+                        log.warn("[forwardToThirdParty][还原入局原始Via失败,保留响应当前Via] callId={}, via={}",
+                                callId, inboundTopVia, e);
+                    }
+                } else {
+                    log.warn("[forwardToThirdParty][会话未缓存入局Via,保留响应当前Via回送] callId={}, tp={}:{}",
+                            callId, node != null ? node.getAddress() : "inbound(入站连接)",
+                            node != null ? node.getPort() : null);
+                }
+                // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做 ICE 候选替换等）
+                Message processed = sdpProcessor.process(response);
+                if (processed instanceof Response processedResponse) {
+                    log.info("[forwardToThirdParty][响应已发送到第三方SIP服务] statusCode={}, callId={}",
+                            processedResponse.getStatusCode(), callId);
+                    try {
+                        targetProvider.sendResponse(processedResponse);
+                    } catch (Exception sendError) {
+                        // 问题31修复: TCP 直连第三方(软电话/普通SIP终端)入局 INVITE 已建服务端事务,
+                        // 无状态 sendResponse 被栈拒绝(Transaction exists -- cannot send response statelessly),
+                        // 且事务兜底会因响应 CSeq(FS 腿)与事务 CSeq(第三方 INVITE)不一致校验失败
+                        // (Response does not belong to this transaction),导致 FS 的 100/180/200/4xx
+                        // 响应全部丢弃、呼叫卡死。优先复用 INVITE 入站 TCP 连接原路回送
+                        // (RFC3261 §18.2.2,与 forwardToFreeSwitch 问题29修复同方案),失败再回退事务兜底
+                        if (!trySendResponseViaInboundChannel(processedResponse, callId)
+                                && !trySendResponseViaTransaction(processedResponse, callId)) {
+                            throw sendError;
+                        }
+                    }
+                }
+                return;
+            }
+            // 请求类消息保持既有转发路径: Request-URI/Contact/顶层 Via 改写为目标节点地址
+            if (node == null) {
+                // 请求类消息必须指定网关节点(入站连接注册表仅缓存入局 INVITE 的连接,会话内请求
+                // 需按目标节点新建连接发送),调用方(forwardRequestByRegistration 等)已保证非空
+                throw new IllegalArgumentException("[forwardToThirdParty][请求类消息转发必须指定第三方节点] node=null");
+            }
             String targetIp = node.getAddress();
             Integer targetPort = node.getPort() != null ? node.getPort() : 5060;
             Message modifiedMessage = modifyHeadersForForwarding(message, targetIp, targetPort, 0);
@@ -226,14 +455,11 @@ public class SipMessageForwarder {
                 targetProvider.sendRequest(request);
                 log.info("[forwardToThirdParty][请求已发送到第三方SIP服务] method={}, tp={}:{}",
                         request.getMethod(), targetIp, targetPort);
-            } else if (message instanceof Response response) {
-                log.info("[forwardToThirdParty][响应已发送到第三方SIP服务] statusCode={}, tp={}:{}",
-                        response.getStatusCode(), targetIp, targetPort);
-                targetProvider.sendResponse(response);
             }
         } catch (Exception e) {
             log.error("[forwardToThirdParty][转发消息到第三方SIP服务失败] tp={}:{}",
-                    node.getAddress(), node.getPort(), e);
+                    node != null ? node.getAddress() : "inbound(入站连接)",
+                    node != null ? node.getPort() : null, e);
             throw new SipProxyException(SipProxyErrorCodeConstants.FORWARD_FAILED,
                     "转发消息到第三方SIP服务失败: " + e.getMessage(), e);
         }
@@ -257,9 +483,92 @@ public class SipMessageForwarder {
     }
 
     /**
+     * 问题31修复: 沿 INVITE 入站 TCP 连接原路回送响应(RFC3261 §18.2.2)
+     * <p>
+     * 背景: TCP 直连第三方(软电话/普通 SIP 终端)的 INVITE 在
+     * {@code SipProxyService.cacheInboundChannelForInvite} 中已按 callId 注册入站连接。
+     * 此类请求已建服务端事务,无状态 sendResponse 被栈拒绝,且事务兜底因响应 CSeq
+     * (FS 腿)与事务 CSeq(第三方 INVITE)不一致而校验失败。直接复用入站
+     * MessageChannel 发送是连接导向传输的规范做法,同时规避按 Via sent-by 新建连接
+     * 不可达(NAT/随机端口)的风险。
+     *
+     * @param response 待回送响应
+     * @param callId   Call-ID(仅用于日志与入站连接注册表查询)
+     * @return true=沿入站连接发送成功; false=未注册连接或发送失败,由调用方继续回退
+     */
+    private boolean trySendResponseViaInboundChannel(Response response, String callId) {
+        try {
+            gov.nist.javax.sip.stack.MessageChannel inboundChannel = inboundChannelRegistry.get(callId);
+            if (inboundChannel == null) {
+                log.warn("[trySendResponseViaInboundChannel][未注册入站连接,无法沿原路回送] callId={}, statusCode={}",
+                        callId, response.getStatusCode());
+                return false;
+            }
+            // jain-sip-ri 1.2.1.4 的 MessageChannel 无 sendResponse 方法,
+            // 用 sendMessage(SIPMessage) 沿同一连接直发(与 forwardToFreeSwitch 问题29修复一致)
+            inboundChannel.sendMessage((gov.nist.javax.sip.message.SIPMessage) response);
+            log.info("[trySendResponseViaInboundChannel][沿INVITE入站连接回送响应成功] callId={}, statusCode={}, peer={}:{}",
+                    callId, response.getStatusCode(), inboundChannel.getPeerAddress(), inboundChannel.getPeerPort());
+            return true;
+        } catch (Exception e) {
+            log.warn("[trySendResponseViaInboundChannel][沿入站连接回送失败,继续回退] callId={}, statusCode={}",
+                    callId, response.getStatusCode(), e);
+            return false;
+        }
+    }
+
+    /**
+     * 问题29残留回归修复: 无状态 sendResponse 被栈拒绝时的事务兜底发送
+     * <p>
+     * 背景: 入站连接注册(路径③)主动为 TCP INVITE 创建了服务端事务,此后 JAIN-SIP
+     * 栈拒绝同一事务的无状态回送,抛 "Transaction exists -- cannot send response statelessly"。
+     * 此时按响应的顶层 Via branch+CSeq 从栈内查到该服务端事务并经其发送——事务的
+     * 发送通道即请求到达的入站连接,恰好满足 RFC3261 §18.2.2 同连接回送要求。
+     *
+     * @param response 待回送响应
+     * @param callId   Call-ID(仅用于日志)
+     * @return true=事务兜底发送成功; false=未找到事务或发送失败,由调用方继续原异常路径
+     */
+    private boolean trySendResponseViaTransaction(Response response, String callId) {
+        try {
+            if (!(sipStack instanceof gov.nist.javax.sip.stack.SIPTransactionStack txStack)) {
+                return false;
+            }
+            gov.nist.javax.sip.stack.SIPTransaction transaction =
+                    txStack.findTransaction((gov.nist.javax.sip.message.SIPMessage) response, true);
+            if (!(transaction instanceof javax.sip.ServerTransaction serverTransaction)) {
+                log.warn("[trySendResponseViaTransaction][栈内未找到对应服务端事务,无法兜底发送] callId={}, statusCode={}",
+                        callId, response.getStatusCode());
+                return false;
+            }
+            serverTransaction.sendResponse(response);
+            log.info("[trySendResponseViaTransaction][无状态回送被栈拒绝,已改经服务端事务发送成功] callId={}, statusCode={}",
+                    callId, response.getStatusCode());
+            return true;
+        } catch (Exception e) {
+            log.warn("[trySendResponseViaTransaction][事务兜底发送失败] callId={}, statusCode={}",
+                    callId, response.getStatusCode(), e);
+            return false;
+        }
+    }
+
+    /**
      * 修改SIP消息头以便正确转发到FreeSWITCH或第三方SIP服务
      */
     public Message modifyHeadersForForwarding(Message message, String targetIp, Integer targetPort, int attemptCount)
+            throws Exception {
+        return modifyHeadersForForwarding(message, targetIp, targetPort, attemptCount, null);
+    }
+
+    /**
+     * 修改SIP消息头以便正确转发到FreeSWITCH或第三方SIP服务
+     *
+     * @param transportOverride 传输协议覆盖项: 非空时 Via/Contact 的 transport 使用该值,
+     *                          不再取 sessionInfo.getToSipTransport()(问题27: 出局网关腿的
+     *                          transport 必须按网关自身协议,与 FS 腿 transport 解耦)
+     */
+    public Message modifyHeadersForForwarding(Message message, String targetIp, Integer targetPort, int attemptCount,
+                                              String transportOverride)
             throws Exception {
         log.debug("[modifyHeadersForForwarding][开始修改SIP头] message={}, target={}:{}, attemptCount={}",
                 message.getClass().getSimpleName(), targetIp, targetPort, attemptCount);
@@ -272,7 +581,9 @@ public class SipMessageForwarder {
         String branchId = SipAnalysisUtil.getBranch(message);
         try {
             String transport = "udp";
-            if (sessionInfo.getToSipTransport() != null) {
+            if (transportOverride != null && !transportOverride.isEmpty()) {
+                transport = transportOverride;
+            } else if (sessionInfo.getToSipTransport() != null) {
                 transport = sessionInfo.getToSipTransport();
             }
 
@@ -571,7 +882,16 @@ public class SipMessageForwarder {
         String callId = SipAnalysisUtil.getCallId(request);
         SessionInfo sessionInfo = sessionManager.getSessionInfo(callId);
 
-        modifyHeadersForForwarding(request, gatewayIp, gatewayPort, 0);
+        // 问题27修复: 出局网关腿的 transport/provider 必须按网关自身协议
+        // (cc_sipproxy_gateway.transport_protocol: 1=UDP, 2=TCP, 缺省 UDP)决定,
+        // 与 FS→代理腿的 sessionInfo.getToSipTransport() 解耦。此前 FS 腿切 TCP 后
+        // 误随会话 transport 选了 sipProviderTcp,而 Route 头 transport=udp(网关协议),
+        // JAIN-SIP 无法为 udp 目标创建 TCP 通道 → Could not create a message channel → FS 腿 408。
+        // Route 头(DefaultOutboundGatewayRewriter)已同源取网关协议,此处统一收敛
+        String transport = Integer.valueOf(2).equals(gateway.getTransportProtocol())
+                ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
+
+        modifyHeadersForForwarding(request, gatewayIp, gatewayPort, 0, transport);
         rewriteForOutbound(request, gateway, gatewayId);
         // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做编解码过滤等）
         Message processedMessage = sdpProcessor.process(request);
@@ -579,11 +899,10 @@ public class SipMessageForwarder {
             request = processedRequest;
         }
 
-        String transport = "udp";
-        if (sessionInfo != null && sessionInfo.getToSipTransport() != null) {
-            transport = sessionInfo.getToSipTransport();
-        }
-        SipProvider targetProvider = "tcp".equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
+        SipProvider targetProvider = SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
+        log.info("[forwardToOutboundGateway][按网关自身协议选择发送通道] callId={}, gatewayId={}, transportProtocol={}, transport={}, provider={}",
+                callId, gatewayId, gateway.getTransportProtocol(), transport,
+                targetProvider == sipProviderTcp ? "TCP" : "UDP");
 
         if (sessionInfo != null) {
             sessionInfo.setOriginalInviteText(request.toString());

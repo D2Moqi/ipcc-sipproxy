@@ -121,6 +121,52 @@ public class SessionInfo {
      */
     private String originalInviteText;
 
+    /**
+     * 入局第三方 INVITE 的原始顶层 Via 头缓存（不含 "Via: " 名称前缀）
+     * <p>
+     * 业务背景：呼入(INBOUND)场景下 200 OK/ringing 等响应回送第三方主叫时，
+     * 必须遵循 RFC3581 发往原始请求顶层 Via 的 received:rport（NAT 穿透真实来源），
+     * 而不能按第三方网关节点静态配置 address:port 发送——软电话等客户端实际注册端口
+     * 常为随机端口（如 rport=61199），与网关静态配置端口（如 5060）不一致，
+     * 按静态配置发送会导致 200 OK 丢失、主叫持续重传 INVITE 直至 408 超时。
+     * <p>
+     * 取值规则：第三方来源(INBOUND) INVITE 建会话时保存其顶层 Via 原文；
+     * rport 缺失时由消费方回退 Via sent-by host:port（JAIN-SIP 按 Via 规则自然回退）。
+     * <p>
+     * 持久化策略：String 文本随 SessionInfo 序列化存入 Redis，跨请求/响应周期有效。
+     */
+    private String inboundTopVia;
+
+    /**
+     * 出局方向 FS INVITE 的原始顶层 Via 头缓存（不含 "Via: " 名称前缀）
+     * <p>
+     * 业务背景：出局(OUTBOUND)场景下 CC FS 发起的出局 INVITE 经代理转发到第三方网关后，
+     * 第三方返回的 200 OK/ringing/4xx 等响应必须遵循 RFC3581 发往原始请求顶层 Via 的
+     * received:rport（即 CC FS 实际发送端口，如 15580/16580），否则 CC FS 收不到任何响应，
+     * 持续重传 INVITE 直至 Timer B 超时 408。
+     * <p>
+     * 取值规则：FS 来源(OUTBOUND/INTERNAL) INVITE 建会话时保存其顶层 Via 原文；
+     * 响应回送 FS 时还原该 Via 后直接发送，JAIN-SIP 按 received:rport 准确投递。
+     * <p>
+     * 持久化策略：String 文本随 SessionInfo 序列化存入 Redis，跨请求/响应周期有效。
+     */
+    private String outboundFsTopVia;
+
+    /**
+     * 出局方向 FS INVITE 的原始 CSeq 序号缓存
+     * <p>
+     * 业务背景：出局(OUTBOUND)场景 CC FS 发起的 INVITE 若触发第三方网关 407 挑战，
+     * 代理按 RFC3261 §22.2 重发带 Digest 凭据的 INVITE，新事务必须递增 CSeq。
+     * 网关对重发请求返回的 200 OK 携带递增后的 CSeq（如 118629022），若原样回送 CC FS，
+     * 其 sofia 因 CSeq 与自身 INVITE（如 118629021）不一致无法关联事务，
+     * 丢弃 200 OK → 无 ACK → Timer B 超时 408。回送 FS 前必须还原为原始 CSeq。
+     * <p>
+     * 取值规则：FS 来源(OUTBOUND/INTERNAL) INVITE 建会话时保存其 CSeq 序号。
+     * <p>
+     * 持久化策略：随 SessionInfo 序列化存入 Redis，跨请求/响应周期有效。
+     */
+    private Long outboundFsCSeq;
+
 
     public SessionInfo() {
     }

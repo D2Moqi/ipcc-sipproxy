@@ -17,6 +17,7 @@ import javax.sip.address.AddressFactory;
 import javax.sip.header.CSeqHeader;
 import javax.sip.header.HeaderFactory;
 import javax.sip.header.ProxyAuthenticateHeader;
+import javax.sip.header.ToHeader;
 import javax.sip.header.ViaHeader;
 import javax.sip.message.Request;
 import javax.sip.message.Response;
@@ -141,6 +142,40 @@ public class GatewayAuthManager {
             log.info("[handle407Challenge][收到407挑战] callId={}, challengeCount={}, realm={}, nonce={}, qop={}, stale={}",
                     callId, challengeCount, realm, nonce, qop, stale);
 
+            // 提前解析原始INVITE文本缓存（重传407的ACK回送与Digest重发均需使用）
+            String inviteText = sessionInfo.getOriginalInviteText();
+            if (inviteText == null || inviteText.isEmpty()) {
+                log.error("[handle407Challenge][原始INVITE文本缓存为空] callId={}", callId);
+                return false;
+            }
+            Request inviteRequest;
+            try {
+                inviteRequest = SipAnalysisUtil.parseSipMessageRequest(inviteText);
+            } catch (ParseException e) {
+                log.error("[handle407Challenge][解析原始INVITE文本失败] callId={}", callId, e);
+                return false;
+            }
+
+            // 问题27修复: 407 重发 INVITE/ACK 的发送通道按出局网关自身协议
+            // (transport_protocol: 1=UDP, 2=TCP, 缺省 UDP)决定,与 FS 腿 transport 解耦,
+            // 与 forwardToOutboundGateway 的取值同源(优先用会话缓存的网关节点,缺失时按 gatewayId 查询)
+            GatewayInfo gwNode = sessionInfo.getThirdPartyNode();
+            if (gwNode == null && sessionInfo.getGatewayId() != null && !sessionInfo.getGatewayId().isEmpty()) {
+                gwNode = gatewayProvider.getGatewayById(sessionInfo.getGatewayId());
+            }
+            String transport = (gwNode != null && Integer.valueOf(2).equals(gwNode.getTransportProtocol()))
+                    ? "tcp" : "udp";
+            SipProvider targetProvider = "tcp".equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
+
+            // 重传407识别：已重发过(challengeCount>=1)且nonce未变化，说明这是FS按RFC3261事务重传规则
+            // 重传的原事务407（等待ACK），并非新挑战。ACK掉原事务并拦截该407，等待重发INVITE的响应，
+            // 避免误判为凭证错误而把407透传给CC FS引发重试风暴
+            if (challengeCount >= 1 && nonce != null && nonce.equals(sessionInfo.getLast407Nonce())) {
+                log.info("[handle407Challenge][识别为重传407，ACK原事务并拦截] callId={}, nonce={}", callId, nonce);
+                sendAckFor407(response, inviteRequest, targetProvider, callId);
+                return true;
+            }
+
             if (!canRetry(challengeCount, stale, nonce, sessionInfo.getLast407Nonce(), callId)) {
                 return false;
             }
@@ -164,19 +199,6 @@ public class GatewayAuthManager {
             String password = gateway.getPassword();
             if (username == null || username.isEmpty() || password == null || password.isEmpty()) {
                 log.error("[handle407Challenge][网关未配置用户名或密码] gatewayId={}", gatewayId);
-                return false;
-            }
-
-            String inviteText = sessionInfo.getOriginalInviteText();
-            if (inviteText == null || inviteText.isEmpty()) {
-                log.error("[handle407Challenge][原始INVITE文本缓存为空] callId={}", callId);
-                return false;
-            }
-            Request inviteRequest;
-            try {
-                inviteRequest = SipAnalysisUtil.parseSipMessageRequest(inviteText);
-            } catch (ParseException e) {
-                log.error("[handle407Challenge][解析原始INVITE文本失败] callId={}", callId, e);
                 return false;
             }
 
@@ -209,6 +231,14 @@ public class GatewayAuthManager {
                 authValue.append(", cnonce=\"").append(cnonce).append("\"");
             }
 
+            // DEBUG 级联调日志：打印参与 Digest 计算的全部要素与最终头值，便于与 RFC 2617 标准实现/FS 侧期望值对照
+            log.debug("[handle407Challenge][Digest要素] callId={}, username={}, realm={}, method={}, uri={}, nonce={}, qop={}, nc={}, cnonce={}, response={}, header=[{}]",
+                    callId, username, realm, method, uriString, nonce, qop, nc, cnonce, digestResponse, authValue);
+
+            // ACK掉原407事务（RFC 3261：INVITE的非2xx响应UAC必须回ACK），终止FS侧事务重传；
+            // 必须在替换branch/CSeq之前执行，保证ACK携带原事务的Via branch
+            sendAckFor407(response, inviteRequest, targetProvider, callId);
+
             javax.sip.header.Header proxyAuthorizationHeader = headerFactory.createHeader("Proxy-Authorization", authValue.toString());
             inviteRequest.removeHeader("Proxy-Authorization");
             inviteRequest.addHeader(proxyAuthorizationHeader);
@@ -226,8 +256,8 @@ public class GatewayAuthManager {
             sessionInfo.setLast407Nonce(nonce);
             sessionManager.updateSessionInfo(sessionInfo);
 
-            String transport = sessionInfo.getToSipTransport() != null ? sessionInfo.getToSipTransport() : "udp";
-            SipProvider targetProvider = "tcp".equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
+            // DEBUG 级联调日志：打印重发 INVITE 报文全文，便于与实测通过的报文逐字节对比
+            log.debug("[handle407Challenge][重发INVITE报文全文] callId={}\n{}", callId, inviteRequest);
             targetProvider.sendRequest(inviteRequest);
 
             log.info("[handle407Challenge][Digest鉴权重发INVITE成功] callId={}, gatewayId={}, username={}, qop={}",
@@ -286,6 +316,47 @@ public class GatewayAuthManager {
         log.warn("[canRetry][凭证错误或nonce未更新，不再重试] callId={}, challengeCount={}, stale={}",
                 callId, challengeCount, stale);
         return false;
+    }
+
+    /**
+     * 对407响应回送ACK（RFC 3261：INVITE的非2xx最终响应UAC必须回ACK）
+     * <p>
+     * 背景：sipproxy拦截407后若不ACK原事务，FS事务层会按RFC重传规则持续重传407，
+     * 重传的407会干扰挑战计数判断（被误判为凭证错误）。ACK基于原始INVITE克隆构造，
+     * 保持相同Via branch/From/Call-ID/Request-URI，CSeq与407一致，To tag取自407响应。
+     *
+     * @param response      407响应
+     * @param inviteRequest 重建的原始INVITE（替换branch/CSeq之前调用）
+     * @param provider      发送通道
+     * @param callId        呼叫ID（日志用）
+     */
+    private void sendAckFor407(Response response, Request inviteRequest, SipProvider provider, String callId) {
+        try {
+            CSeqHeader respCSeq = (CSeqHeader) response.getHeader(CSeqHeader.NAME);
+            if (respCSeq == null) {
+                log.warn("[sendAckFor407][407响应无CSeq头，跳过ACK] callId={}", callId);
+                return;
+            }
+            Request ackRequest = (Request) inviteRequest.clone();
+            ackRequest.setMethod(Request.ACK);
+            CSeqHeader ackCSeq = (CSeqHeader) ackRequest.getHeader(CSeqHeader.NAME);
+            if (ackCSeq != null) {
+                ackCSeq.setSeqNumber(respCSeq.getSeqNumber());
+                ackCSeq.setMethod(Request.ACK);
+            }
+            ToHeader respTo = (ToHeader) response.getHeader(ToHeader.NAME);
+            ToHeader ackTo = (ToHeader) ackRequest.getHeader(ToHeader.NAME);
+            if (respTo != null && respTo.getTag() != null && ackTo != null) {
+                ackTo.setTag(respTo.getTag());
+            }
+            // ACK不携带消息体与鉴权头
+            ackRequest.removeHeader("Proxy-Authorization");
+            ackRequest.removeContent();
+            provider.sendRequest(ackRequest);
+            log.info("[sendAckFor407][已发送ACK终止原407事务] callId={}, cseq={}", callId, respCSeq.getSeqNumber());
+        } catch (Exception e) {
+            log.warn("[sendAckFor407][ACK发送失败，不阻塞鉴权重发] callId={}", callId, e);
+        }
     }
 
     /**
