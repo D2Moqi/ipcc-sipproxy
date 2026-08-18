@@ -104,6 +104,21 @@ public class WsRegisterRequestHandler extends AbstractWsSipRequestHandler {
 
             if (isValid) {
                 log.info("[doHandle][分机注册验证成功] username={}", username);
+                // 唯一登录检查：同一坐席是否已在其他地方登录
+                String existingSessionId = sessionManager.getSessionIdByUser(username, realm);
+                if (existingSessionId != null && !existingSessionId.equals(sessionId)) {
+                    log.warn("[doHandle][检测到重复登录] username={}, existingSessionId={}, newSessionId={}", username, existingSessionId, sessionId);
+                    boolean allowNewLogin = authenticationCallback.onDuplicateLogin(username, realm, existingSessionId, sessionId);
+                    if (!allowNewLogin) {
+                        log.info("[doHandle][重复登录被拒绝] username={}", username);
+                        send403Response(sessionId, request, "Duplicate Login");
+                        notifyFailure(username, realm, "该坐席已在其他地方登录，拒绝新登录");
+                        return;
+                    }
+                    // 允许新登录，清理旧会话的注册信息
+                    log.info("[doHandle][强制登录，清理旧会话] username={}, existingSessionId={}", username, existingSessionId);
+                    sessionManager.cleanupRegisterInfo(existingSessionId);
+                }
                 send200OkResponse(sessionId, request);
                 sessionManager.cacheRegisterInfo(sessionId, username, realm);
                 // 触发认证成功回调
@@ -194,9 +209,23 @@ public class WsRegisterRequestHandler extends AbstractWsSipRequestHandler {
     }
 
     private void send403Response(String sessionId, Request request) throws Exception {
+        send403Response(sessionId, request, null);
+    }
+
+    /**
+     * 发送 403 Forbidden 响应，支持自定义原因短语
+     *
+     * @param sessionId    WebSocket 会话 ID
+     * @param request      REGISTER 请求
+     * @param reasonPhrase 原因短语，为 null 时使用默认值 "Forbidden"
+     */
+    private void send403Response(String sessionId, Request request, String reasonPhrase) throws Exception {
         var response = messageFactory.createResponse(Response.FORBIDDEN, request);
         response.addHeader(headerFactory.createHeader("Server", "CcSipProxyService/1.0"));
         response.addHeader(headerFactory.createHeader("Content-Length", "0"));
+        if (reasonPhrase != null) {
+            response.setReasonPhrase(reasonPhrase);
+        }
         messageForwarder.toWebSocket(sessionId, response);
     }
 

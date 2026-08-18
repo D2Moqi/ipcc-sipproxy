@@ -27,4 +27,22 @@ public interface AuthenticationCallback {
      * @param reason    失败原因（如 "密码错误"、"坐席不存在"）
      */
     void onFailure(String extension, String domain, String reason);
+
+    /**
+     * 重复登录检查回调（在发送 200 OK 之前调用）
+     * <p>
+     * 当同一坐席已有活跃会话时，sipproxy 在发送 200 OK 之前调用此方法，
+     * 由父程序决定是否允许新登录（如强制踢下线旧会话）。
+     * <p>
+     * 默认实现（NoopAuthenticationCallback）直接返回 true，允许重复登录。
+     *
+     * @param extension         分机号
+     * @param domain            域名
+     * @param existingSessionId 已存在的 WebSocket 会话 ID
+     * @param newSessionId      新请求的 WebSocket 会话 ID
+     * @return true 允许新登录（旧会话将被清理），false 拒绝新登录
+     */
+    default boolean onDuplicateLogin(String extension, String domain, String existingSessionId, String newSessionId) {
+        return true;
+    }
 }
