@@ -38,11 +38,13 @@ import java.util.List;
  *   <li>FS 节点 IP+端口 精确匹配：遍历 {@link FsNodeProvider#listFsNodes()}，
  *       sipIp+sipPort 与 (sourceIp,sourcePort) <b>完全一致</b> → FREESWITCH</li>
  *   <li>第三方网关 IP 匹配（忽略端口）：遍历 {@link GatewayProvider#listEnabledGateways()}，
- *       address 与 sourceIp <b>仅比较 IP</b>（忽略端口差异）→ THIRD_PARTY。
+ *       address 与 sourceIp <b>或 From 头 domain</b>（均仅比较 IP，忽略端口差异）→ THIRD_PARTY。
  *       为什么忽略端口？FS 型第三方网关可能有多个 profile（internal/external），
  *       originate INVITE 的源端口可能来自 external profile（如 9977），
  *       而数据库配置的是对接用的 internal profile 端口（如 9988），精确匹配会失败。
- *       IP 维度已经足够区分"自有 FS 节点"与"第三方网关节点"。</li>
+ *       IP 维度已经足够区分"自有 FS 节点"与"第三方网关节点"。
+ *       为什么增加 From domain 维度？外部软电话/手机直呼 SIP 代理时 Via 源 IP 为
+ *       公网出口 IP（不在网关列表），但 From 头 domain 常为网关公网地址，可命中列表。</li>
  *   <li>FS UA 兜底识别：仅当 IP+端口 / IP 列表都未命中时，才识别 FreeSWITCH UA 作为兜底
  *       （用于 Response 场景下 Via received 是 sipproxy 自身 IP 的情况，
  *       此时配合 {@code UnifiedResponseHandler} 的 SessionInfo 冲突校正逻辑避免误判）</li>
@@ -165,10 +167,33 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
         // 第三方网关也可能是 FS 部署(UA 相同)，必须先靠网关列表 IP 匹配区分
         String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(message);
         int sourcePort = SipAnalysisUtil.getSourcePortFromMessage(message);
+        // From 头 domain(剥离端口)作为辅助匹配维度, 仅对 Request 生效:
+        // 兼容场景: 外部软电话/手机直呼 SIP 代理时, Via 源 IP 为公网出口 IP(不在
+        // 节点/网关列表); 但 From 头 domain(如 sip:18600000000@62.234.191.165)
+        // 常为网关/FS 的公网地址, 命中列表即可正确识别来源, 保证入局路由与响应回送方向。
+        // 注意: Response 不使用 From domain 匹配 —— FS 回的 200 OK 的 From domain 常与
+        // 网关地址相同(如 4001234@62.234.191.165), 若参与匹配会被误识别为 THIRD_PARTY,
+        // 策略表 (THIRD_PARTY, INBOUND)→FREESWITCH 会把 200 OK 错误转回 FS 自身,
+        // 而正确映射是 (FREESWITCH, INBOUND)→THIRD_PARTY 回给外部主叫。
+        // Response 的方向决策由 ResponseForwardingStrategy + SessionInfo 上下文校正负责。
+        boolean isRequest = message instanceof javax.sip.message.Request;
+        String method = isRequest ? ((javax.sip.message.Request) message).getMethod() : null;
+        String fromDomain = null;
+        if (isRequest) {
+            try {
+                fromDomain = stripPortFromHost(SipAnalysisUtil.getFromDomain(message));
+            } catch (Exception e) {
+                log.debug("[identifySource][提取From domain异常,忽略该匹配维度] msg={}", e.getMessage());
+            }
+        }
 
         if (sourceIp != null && !sourceIp.isEmpty()) {
             // 第3层：匹配自有 FS 节点 (sipIp + sipPort 精确匹配)
-            // 自有 FS 部署在同一台机器的不同 profile（端口不同）很常见，必须按端口区分
+            // 注意: 不使用 From domain 匹配 FS —— 自有 FS 与第三方网关常共用公网 IP
+            // (如 62.234.191.165), 仅凭 From domain 的 IP 无法区分; 且自有 FS 直连
+            // sipproxy, Via 源 IP 一定是 FS 内网/公网地址, 精确匹配可靠。
+            // 若 From domain 也参与 FS 匹配, 外部软电话(From domain=网关公网IP)会被
+            // 误判为 FREESWITCH 而非 THIRD_PARTY, 导致 callType=INTERNAL 走错路由。
             List<FsNodeInfo> allFreeSwitchNodes = fsNodeProvider.listFsNodes();
             if (allFreeSwitchNodes != null) {
                 for (FsNodeInfo fsNode : allFreeSwitchNodes) {
@@ -179,18 +204,56 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
                     }
                 }
             }
-            // 第4层：匹配已启用第三方网关（仅比较 IP，忽略端口差异）
+            // 第4层前置排除: 自有 FS 与第三方网关可能共用公网 IP(如 62.234.191.165), 而 FS 从
+            // internal profile 发出请求时源端口不匹配节点表 external 端口, 第3层 IP+端口精确
+            // 匹配会失败; 此时若 From domain 恰为网关公网地址, 第4层会把 FS 源误判为 THIRD_PARTY。
+            // 处理: sourceIp 命中自有 FS IP(忽略端口) → 直接判定 FREESWITCH(Via 源 IP 必为 FS 自身);
+            // fromDomain 命中自有 FS IP → 仅跳过第4层的 From domain 维度(源IP仍可匹配网关),
+            // 避免外部软电话(From domain=共用公网IP)被误判 THIRD_PARTY。
+            boolean sourceIpHitFs = false;
+            boolean fromDomainHitFs = false;
+            if (allFreeSwitchNodes != null) {
+                for (FsNodeInfo fsNode : allFreeSwitchNodes) {
+                    if (fsNode.getSipIp() == null) {
+                        continue;
+                    }
+                    if (fsNode.getSipIp().equals(sourceIp)) {
+                        sourceIpHitFs = true;
+                    }
+                    if (fromDomain != null && fsNode.getSipIp().equals(fromDomain)) {
+                        fromDomainHitFs = true;
+                    }
+                }
+            }
+            if (sourceIpHitFs) {
+                log.debug("[identifySource][源IP命中自有FS节点(忽略端口), 识别为FREESWITCH] sourceIp={}", sourceIp);
+                return SipProxyConstants.FREESWITCH;
+            }
+            // 第4层：匹配已启用第三方网关（仅比较 IP，忽略端口差异；源IP 或 From domain 任一命中即可）
             // 典型场景：gw3（FS 型 SBC）配置 port=9988（internal profile），
             // 但 originate INVITE 实际源端口=9977（external profile），端口完全不同。
             // 由于"第3层已排除所有自有 FS 节点"，此处同一 IP 不可能再是自有 FS，
             // 所以只比较 IP 是安全的，不会与自有 FS 节点混淆。
-            List<GatewayInfo> allThirdPartyNodes = gatewayProvider.listEnabledGateways();
-            if (allThirdPartyNodes != null) {
-                for (GatewayInfo gateway : allThirdPartyNodes) {
-                    if (sourceIp.equals(gateway.getAddress())) {
-                        log.debug("[identifySource][命中网关IP（忽略端口）] sourceIp={}:{}, sourcePort忽略, gateway={}, 配置port={}",
-                                sourceIp, sourcePort, gateway.getName(), gateway.getPort());
-                        return SipProxyConstants.THIRD_PARTY;
+            // 注意: 本层仅对 Request 生效 —— Response 的 Via received 是 sipproxy 自身 IP
+            // (如 62.234.191.165), 若参与网关匹配会被误判为 THIRD_PARTY, 策略表
+            // (THIRD_PARTY, INBOUND)→FREESWITCH 会把 FS 回的 200 OK 错误转回 FS 自身,
+            // 外部主叫(软电话/手机)收不到响应持续重传 INVITE 直至 408。
+            // Response 的方向决策由 ResponseForwardingStrategy + SessionInfo 上下文校正负责。
+            // ACK 同样不参与网关匹配: ACK 是 FS 对坐席 200 OK 的事务确认, Via received 也是
+            // sipproxy 自身 IP, 误判 THIRD_PARTY 会导致 ACK 走默认处理器转发到第三方,
+            // 坐席(被叫)收不到 ACK → JsSIP confirmed 不触发 → 前端通话计时不启动。
+            if (isRequest && !"ACK".equalsIgnoreCase(method)) {
+                List<GatewayInfo> allThirdPartyNodes = gatewayProvider.listEnabledGateways();
+                if (allThirdPartyNodes != null) {
+                    for (GatewayInfo gateway : allThirdPartyNodes) {
+                        // fromDomainHitFs 时仅按源IP匹配(From domain=自有FS地址不等于网关, 排除该维度)
+                        if (fromDomainHitFs
+                                ? (sourceIp != null && sourceIp.equals(gateway.getAddress()))
+                                : matchesGatewayAddress(sourceIp, fromDomain, gateway.getAddress())) {
+                            log.debug("[identifySource][命中网关IP(源IP或From domain，忽略端口)] sourceIp={}:{}, fromDomain={}, gateway={}, 配置port={}",
+                                    sourceIp, sourcePort, fromDomain, gateway.getName(), gateway.getPort());
+                            return SipProxyConstants.THIRD_PARTY;
+                        }
                     }
                 }
             }
@@ -241,6 +304,29 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
             return hostWithPort.substring(0, lastColon);
         }
         return hostWithPort;
+    }
+
+    /**
+     * 比较 (实际来源 IP / From domain) 与网关配置地址是否匹配
+     * <p>
+     * 比较规则：
+     * <ol>
+     *   <li>网关地址必须非空</li>
+     *   <li>Via 源 IP 或 From 头 domain 任一等于网关地址即命中（忽略端口差异）
+     *       —— From domain 维度兼容外部软电话/手机直呼 SIP 代理时源 IP 不在网关列表的场景</li>
+     * </ol>
+     *
+     * @param sourceIp       实际来源 IP（可能为空）
+     * @param fromDomain     From 头 domain（已剥离端口，可能为空）
+     * @param gatewayAddress 网关配置地址（可能为空）
+     * @return true=匹配
+     */
+    private static boolean matchesGatewayAddress(String sourceIp, String fromDomain, String gatewayAddress) {
+        if (gatewayAddress == null || gatewayAddress.isEmpty()) {
+            return false;
+        }
+        return (sourceIp != null && sourceIp.equals(gatewayAddress))
+                || (fromDomain != null && fromDomain.equals(gatewayAddress));
     }
 
     /**

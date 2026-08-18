@@ -29,6 +29,16 @@ public class GatewayInfo {
     /** 网关端口（出局 INVITE 的 target port） */
     private Integer port;
 
+    /**
+     * 代理回程 IP（可选填）：出局 INVITE 的 Via/Contact 头中"代理自身地址"使用的 IP，
+     * 用于告知第三方网关应向哪个 IP 回送响应/后续 in-dialog 请求。
+     * <p>
+     * 背景（2026-08-14）：云厂商 NAT 模式下公网 IP 绑定在 lo，若代理只监听内网 IP
+     * （或需让网关从内网回程），可配置为内网 IP（如 10.2.0.14），网关响应发往该地址；
+     * 不填（null/空）时默认使用 sip.public-ip（现有行为不变）。
+     */
+    private String toSipProxyIp;
+
     /** 外部线路号码（fromUser / DID，出局 INVITE 的 From/User-Agent 改写值） */
     private String externalLineNumber;
 

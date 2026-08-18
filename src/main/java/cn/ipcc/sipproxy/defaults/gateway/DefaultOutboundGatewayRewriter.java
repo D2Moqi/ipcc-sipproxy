@@ -115,7 +115,16 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
             // transportProtocol：1=UDP（默认），2=TCP（与 cc_sipproxy_gateway 配置语义一致）
             String transport = Integer.valueOf(2).equals(gatewayInfo.getTransportProtocol())
                     ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
-            SipURI routeUri = addressFactory.createSipURI(null, gatewayIp);
+            // Route 发送目标 IP：网关配置了 toSipProxyIp 时优先使用（可选填，默认=网关地址）。
+            // 背景（2026-08-15）：云厂商 NAT 模式下公网 IP 绑定在 lo，FreeSWITCH 的 sip-ip=0.0.0.0
+            // 实际绑定内网 IP(10.2.0.14)。本机 sipproxy 发往 自身公网IP:端口 的包走 lo 无监听被丢弃；
+            // 发往 内网IP:端口 可达。故本机部署的网关(如 fs3)配置 toSipProxyIp=内网IP 时，
+            // Route 头用该内网 IP 发送，保障出局信令可达（toSipProxyIp 同时用于 Via/Contact 回程地址）。
+            String routeTargetIp = gatewayInfo.getToSipProxyIp();
+            if (routeTargetIp == null || routeTargetIp.trim().isEmpty()) {
+                routeTargetIp = gatewayIp;
+            }
+            SipURI routeUri = addressFactory.createSipURI(null, routeTargetIp);
             routeUri.setPort(gatewayPort);
             routeUri.setTransportParam(transport);
             RouteHeader routeHeader = headerFactory.createRouteHeader(addressFactory.createAddress(routeUri));
@@ -198,7 +207,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
     /**
      * 构造 SIP URI（兼容 host 带端口场景）
      * <p>
-     * 修复背景：fromDomain 缺省回退网关地址时可能为 "host:port" 形式（如 62.234.191.165:9988），
+     * fromDomain 缺省回退网关地址时可能为 "host:port" 形式（如 62.234.191.165:9988），
      * 直接传入 addressFactory.createSipURI(user, "host:port") 时 JAIN-SIP 将 host 整体
      * 按 GenericURI 解析抛 ParseException（Bad URI format），导致 PAI/From 改写失败。
      * 此处先拆分 host 与 port，再用 SipURI.setPort 显式设置，保证生成标准 sip:user@host:port 语法。

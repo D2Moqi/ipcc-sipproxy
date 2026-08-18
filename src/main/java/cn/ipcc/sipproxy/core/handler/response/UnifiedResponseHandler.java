@@ -147,7 +147,15 @@ public class UnifiedResponseHandler extends AbstractSipResponseHandler {
         // (覆盖 FS 型 SBC 返回的 100 Trying/183/200 OK 被 FS UA 兜底误识别)
         // 呼入(INBOUND)不适用: 200 来自 FS 需经 (FREESWITCH, INBOUND)→THIRD_PARTY 回给第三方主叫,
         // 强制 THIRD_PARTY 会被策略表映射回 FREESWITCH 形成回环(408 超时)
-        if (hasThirdParty && SipProxyConstants.CALL_TYPE_OUTBOUND.equals(callType)) {
+        // 修复(2026-08-15 场景2 外呼无 CDR 根因): 坐席(WEBSOCKET)发起的外呼 INVITE 携带
+        // X-Gateway-Id(指定网关出局)时, sessionInfo.gatewayId 非空 → hasThirdParty=true,
+        // 导致 FS 应答 INVITE 的 200 OK(初始被 UA 兜底识别为 WEBSOCKET)被本校正抢先强制为
+        // THIRD_PARTY → 转发回 FS, 坐席收不到 200 OK → 不发 ACK → fs1 等 ACK 26s(answer 卡)
+        // → CHANNEL_ANSWER 不触发 → 流程不驱动 → 无 CDR。
+        // 修正: 初始来源为 WEBSOCKET 的响应不强制 THIRD_PARTY, 交由校正2 识别为 FREESWITCH
+        // (FS 应答坐席 INVITE), 再按策略表 (FREESWITCH, OUTBOUND)→WEBSOCKET 回给坐席。
+        if (hasThirdParty && SipProxyConstants.CALL_TYPE_OUTBOUND.equals(callType)
+                && !SipProxyConstants.WEBSOCKET.equals(source)) {
             if (!SipProxyConstants.THIRD_PARTY.equals(source)) {
                 log.info("[correctSourceBySessionContext][第三方leg校正] callId={}, 原来源={} → 校正为=THIRD_PARTY " +
                                 "(thirdPartyNode={}, gatewayId={})",

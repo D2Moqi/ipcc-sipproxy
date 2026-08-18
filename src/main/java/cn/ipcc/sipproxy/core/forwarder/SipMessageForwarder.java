@@ -26,6 +26,7 @@ import javax.sip.address.Address;
 import javax.sip.address.AddressFactory;
 import javax.sip.address.SipURI;
 import javax.sip.address.URI;
+import javax.sip.header.CSeqHeader;
 import javax.sip.header.ContactHeader;
 import javax.sip.header.ContentTypeHeader;
 import javax.sip.header.Header;
@@ -318,6 +319,55 @@ public class SipMessageForwarder {
     }
 
     /**
+     * 入局呼叫(第三方主叫直连代理)INVITE 事务响应的 Contact 头改写为代理公网地址
+     * <p>
+     * 设计意图：sipproxy 作为 B2BUA 必须让入局主叫的后续 in-dialog 请求(BYE/ACK/UPDATE/INFO)
+     * 回到代理转发，而非直发 FS。FS 的 200 OK 中 Contact 是 FS 自身地址(如 sip:4001234@公网:15580)，
+     * 若原样透传，pjsua 等严格 RFC3261 客户端会把 BYE 发往该地址；该地址在 FS external profile 上
+     * 无对应 dialog(呼叫经代理建立)，FS 丢弃 BYE 不回 200 OK → 客户端按重传退避重发多次(约 10s)
+     * → 最终靠媒体超时才挂断，坐席侧挂断联动延迟 10s+。
+     * <p>
+     * 约束：仅处理 INVITE 事务响应(通过 CSeq method 判断)，REGISTER/OPTIONS/SUBSCRIBE 等
+     * 响应(Contact 承载注册/订阅地址语义)保持原样；WS 坐席腿响应走 forwardToWebSocketByUser，
+     * 不受此方法影响。
+     *
+     * @param response 待回送入局主叫的响应
+     * @param callId   呼叫标识
+     */
+    private void rewriteInboundInviteContactForClient(Response response, String callId) {
+        try {
+            // 仅 INVITE 事务响应需要改写(Contact 决定 in-dialog 请求路由)
+            CSeqHeader cseq = (CSeqHeader) response.getHeader(CSeqHeader.NAME);
+            if (cseq == null || !Request.INVITE.equalsIgnoreCase(cseq.getMethod())) {
+                return;
+            }
+            ContactHeader contactHeader = (ContactHeader) response.getHeader(ContactHeader.NAME);
+            if (contactHeader == null) {
+                return;
+            }
+            String before = contactHeader.toString();
+            SipURI contactUri = addressFactory.createSipURI(null, properties.getSip().getPublicIp());
+            contactUri.setPort(properties.getSip().getPublicPort());
+            // transport 沿用 FS 出局腿协议(入局主叫侧),缺省 UDP
+            String fsTransport = SipProxyConstants.TRANSPORT_UDP;
+            ViaHeader topVia = (ViaHeader) response.getHeader(ViaHeader.NAME);
+            if (topVia != null && topVia.getTransport() != null) {
+                fsTransport = topVia.getTransport().toLowerCase();
+            }
+            contactUri.setParameter(SipProxyConstants.TRANSPORT_PARAM, fsTransport);
+            ContactHeader newContactHeader = headerFactory.createContactHeader(
+                    addressFactory.createAddress(contactUri));
+            response.removeHeader(ContactHeader.NAME);
+            response.addHeader(newContactHeader);
+            log.info("[forwardToThirdParty][入局INVITE响应Contact改写为代理地址] callId={}, 改写前={}, 改写后={}",
+                    callId, before, newContactHeader);
+        } catch (Exception e) {
+            // 改写失败保留原始 Contact,不阻断响应回送
+            log.warn("[forwardToThirdParty][入局INVITE响应Contact改写失败,保留原始Contact] callId={}", callId, e);
+        }
+    }
+
+    /**
      * 实际的FreeSWITCH转发逻辑（无故障转移）
      *
      * @param message SIP消息
@@ -416,6 +466,16 @@ public class SipMessageForwarder {
                     log.warn("[forwardToThirdParty][会话未缓存入局Via,保留响应当前Via回送] callId={}, tp={}:{}",
                             callId, node != null ? node.getAddress() : "inbound(入站连接)",
                             node != null ? node.getPort() : null);
+                }
+                // 入局呼叫(第三方主叫直连代理发起 INVITE)的 INVITE 事务响应:
+                // Contact 头改写为代理公网地址(publicIp:publicPort),保证客户端后续
+                // in-dialog 请求(BYE/ACK/UPDATE/INFO)按 RFC3261 路由回代理转发。
+                // 此前保持原样回送导致 FS 的 200 OK Contact(fs:15580)被透传, pjsua 等
+                // 终端按该地址直发 BYE 打错端口 → FS 无此 dialog 不回 200 OK → 客户端
+                // 按重传退避重发 6 次(约 10s) → 最终靠媒体超时才挂断, 坐席侧挂断联动
+                // 延迟 10s+。仅改 INVITE 事务(REGISTER/OPTIONS 等响应 Contact 不动)。
+                if (inboundTopVia != null && !inboundTopVia.isEmpty()) {
+                    rewriteInboundInviteContactForClient(response, callId);
                 }
                 // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做 ICE 候选替换等）
                 Message processed = sdpProcessor.process(response);
@@ -891,6 +951,10 @@ public class SipMessageForwarder {
                 ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
 
         modifyHeadersForForwarding(request, gatewayIp, gatewayPort, 0, transport);
+        // 代理回程 IP 适配（toSipProxyIp）：出局 INVITE 的 Via/Contact 头中"代理自身地址"
+        // 使用网关配置的 toSipProxyIp（可选填），告知第三方网关应向该 IP 回送响应/后续请求。
+        // 不填时保持 modifyHeadersForForwarding 写入的 sip.public-ip（默认行为）。
+        rewriteViaContactProxyIp(request, gateway);
         rewriteForOutbound(request, gateway, gatewayId);
         // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做编解码过滤等）
         Message processedMessage = sdpProcessor.process(request);
@@ -944,6 +1008,50 @@ public class SipMessageForwarder {
     private void rewriteForOutbound(Request request, GatewayInfo gateway, String gatewayId) {
         log.info("[rewriteForOutbound][委托扩展点进行出局信令改写] gatewayId={}", gatewayId);
         outboundGatewayRewriter.rewrite(request, gateway);
+    }
+
+    /**
+     * 出局 INVITE 的 Via/Contact 代理回程地址改写（toSipProxyIp）
+     * <p>
+     * 需求背景（2026-08-14）：云厂商 NAT 模式公网 IP 绑定在 lo。出局 INVITE 经
+     * {@link #modifyHeadersForForwarding} 写入的 Via/Contact 均为 sip.public-ip:public-port，
+     * 第三方网关按 Via 头回送响应。若代理实际只监听内网 IP（或运维希望网关从内网回程），
+     * 可通过网关配置 toSipProxyIp 指定回程 IP（如 10.2.0.14），此处将 Via 顶层与 Contact 的
+     * host 改写为该 IP，网关的 200 OK/后续 in-dialog 请求即发往该地址。
+     * <p>
+     * 约束：仅出局 INVITE（forwardToOutboundGateway 专用），不影响入局/WS 方向；
+     * 未配置 toSipProxyIp（null/空）时保持 modifyHeadersForForwarding 写入的公网 IP 不变。
+     *
+     * @param request 出局 SIP 请求（INVITE）
+     * @param gateway 目标网关信息（读取 toSipProxyIp）
+     */
+    private void rewriteViaContactProxyIp(Request request, GatewayInfo gateway) {
+        String toIp = gateway.getToSipProxyIp();
+        if (toIp == null || toIp.trim().isEmpty()) {
+            return;
+        }
+        String callId = SipAnalysisUtil.getCallId(request);
+        try {
+            // Via 顶层 host 改写（响应回程地址；RFC3261 响应沿 Via 栈回传）
+            ViaHeader via = (ViaHeader) request.getHeader(ViaHeader.NAME);
+            if (via != null && via.getHost() != null && !toIp.equals(via.getHost())) {
+                String before = via.getHost();
+                via.setHost(toIp);
+                log.info("[rewriteViaContactProxyIp][Via顶层host改写] callId={}, {} -> {}", callId, before, toIp);
+            }
+            // Contact host 改写（in-dialog 请求如 ACK/BYE 回程地址）
+            ContactHeader contact = (ContactHeader) request.getHeader(ContactHeader.NAME);
+            if (contact != null && contact.getAddress() != null
+                    && contact.getAddress().getURI() instanceof SipURI sipUri) {
+                if (!toIp.equals(sipUri.getHost())) {
+                    String before = sipUri.getHost();
+                    sipUri.setHost(toIp);
+                    log.info("[rewriteViaContactProxyIp][Contact host改写] callId={}, {} -> {}", callId, before, toIp);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[rewriteViaContactProxyIp][改写失败,保留原地址] callId={}, toSipProxyIp={}", callId, toIp, e);
+        }
     }
 
     /**

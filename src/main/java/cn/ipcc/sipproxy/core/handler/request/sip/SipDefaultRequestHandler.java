@@ -1,5 +1,8 @@
 package cn.ipcc.sipproxy.core.handler.request.sip;
 
+import cn.hutool.core.text.CharPool;
+import cn.hutool.core.util.StrUtil;
+import cn.ipcc.sipproxy.api.agent.AgentInfoProvider;
 import cn.ipcc.sipproxy.core.handler.response.ResponseForwardingStrategy;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
@@ -25,6 +28,12 @@ public class SipDefaultRequestHandler extends AbstractSipRequestHandler {
 
     @Resource
     private ResponseForwardingStrategy responseForwardingStrategy;
+
+    /**
+     * 坐席信息查询扩展点（用于 ACK 方向校验：判断 To 用户是否为坐席分机）
+     */
+    @Resource
+    private AgentInfoProvider agentInfoProvider;
 
     /**
      * 处理传入的会话内SIP请求（PRACK/UPDATE/INFO等非INVITE/BYE/ACK方法）
@@ -93,6 +102,24 @@ public class SipDefaultRequestHandler extends AbstractSipRequestHandler {
         log.info("[handleIncomingRequest][会话已建立，按source+callType决策转发] callId={}, source={}, callType={}",
                 callId, source, sessionInfo.getCallType());
 
+        // ACK 特判: ACK 是 FS 对坐席 200 OK 的事务确认(INVITE 从 FS originate 推给坐席,
+        // 200 OK 回 FS 后 FS 发 ACK), 必须原路转发回坐席 WebSocket。
+        // ACK 来源识别不稳定(可能误判 THIRD_PARTY/WEBSOCKET)时, 走 strategy 会转发回 FS,
+        // 导致被叫 JsSIP 收不到 ACK → confirmed 不触发 → 前端通话计时不启动。
+        // 会话信息已缓存 INVITE 推给的坐席 sessionId, 直接按它转发。
+        // 仅当 ACK 的 To 用户为坐席分机(FS→坐席段事务确认)且会话缓存了坐席 sessionId 时才
+        // 按会话转发; FS→第三方网关段的 ACK(To 为网关侧号码)不满足坐席判断, 走默认策略,
+        // 避免网关段 ACK 被劫持转发到坐席 WebSocket, 导致网关事务挂起重传。
+        if ("ACK".equalsIgnoreCase(request.getMethod())) {
+            if (isAgentNumber(toUser) && sessionInfo.getSessionId() != null && !sessionInfo.getSessionId().isEmpty()) {
+                log.info("[handleIncomingRequest][ACK按会话坐席WebSocket转发] callId={}, sessionId={}",
+                        callId, sessionInfo.getSessionId());
+                forwardToWebSocket(request, sessionInfo);
+                return;
+            }
+            log.warn("[handleIncomingRequest][ACK To非坐席分机或无坐席会话sessionId,走默认决策] callId={}", callId);
+        }
+
         // 复用 ResponseForwardingStrategy 按 source + callType 决策转发目标
         String target = responseForwardingStrategy.getForwardingTarget(source, sessionInfo.getCallType());
         log.info("[handleIncomingRequest][决策转发目标] callId={}, source={}, callType={}, target={}",
@@ -100,6 +127,30 @@ public class SipDefaultRequestHandler extends AbstractSipRequestHandler {
 
         // 按 target 分支转发
         forwardByTarget(request, callId, target, sessionInfo);
+    }
+
+    /**
+     * 判断 To 头用户是否为坐席分机（兼容注册 AOR 嵌入 domain 的格式，如 "1002&1.com:1"）
+     * <p>
+     * 与 {@code DefaultMessageSourceIdentifier} 坐席匹配逻辑一致: 分机号取 & 前部分,
+     * domain 取 & 后部分, 查询不到坐席记录按非坐席处理。
+     *
+     * @param toUser To 头用户（可能为空）
+     * @return true=坐席分机
+     */
+    private boolean isAgentNumber(String toUser) {
+        if (StrUtil.isBlank(toUser)) {
+            return false;
+        }
+        String[] splitUser = toUser.split(String.valueOf(CharPool.AMP));
+        String extension = splitUser[0];
+        String domainHost = splitUser.length > 1 ? splitUser[1] : null;
+        try {
+            return agentInfoProvider.getAgent(extension, domainHost) != null;
+        } catch (Exception e) {
+            log.warn("[isAgentNumber][查询坐席信息异常,按非坐席处理] toUser={}, err={}", toUser, e.getMessage());
+            return false;
+        }
     }
 
     /**
