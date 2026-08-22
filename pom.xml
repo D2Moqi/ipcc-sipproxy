@@ -20,16 +20,18 @@
     </description>
 
     <properties>
-        <java.version>17</java.version>
+        <java.version>25</java.version>
         <maven.compiler.source>${java.version}</maven.compiler.source>
         <maven.compiler.target>${java.version}</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
 
         <!-- 依赖版本独立管理（不依赖任何 BOM） -->
+        <!-- 注意：修改版本属性后需在 IDEA 中重新加载 Maven 项目（Reload All Maven Projects），
+             否则 IDEA 外部构建系统仍使用旧版本解析结果编译（如 Lombok 旧版在 JDK 25 下会报 TypeTag::UNKNOWN） -->
         <spring-boot.version>3.5.9</spring-boot.version>
         <!-- v1.2 修订：JAIN-SIP 统一版本 1.2.1.4（NIST JAIN-SIP 最稳定发布版本，API 与 RI 同发布周期，避免跨版本 AbstractMethodError） -->
         <jain-sip.version>1.2.1.4</jain-sip.version>
-        <lombok.version>1.18.34</lombok.version>
+        <lombok.version>1.18.46</lombok.version>
         <slf4j.version>2.0.16</slf4j.version>
         <log4j-over-slf4j.version>2.0.16</log4j-over-slf4j.version>
         <!-- hutool 工具集（StrUtil/IdUtil/CollUtil/DigestUtil/StrPool，原 cc-server 代码迁移保留） -->
@@ -142,6 +144,15 @@
             <version>${hutool.version}</version>
         </dependency>
 
+        <!-- Jackson 2（com.fasterxml）：SipSessionManager/SipNodeManager 序列化会话信息、RedisWsMessageSender 序列化广播消息。
+             注意：Spring Boot 4.x 默认仅提供 Jackson 3（tools.jackson），本组件沿用 Jackson 2 需显式声明依赖并注册 Bean，
+             版本与运行时 classpath 中传递引入的 jackson-dataformat-yaml/xml 2.21.4 保持一致 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.21.4</version>
+        </dependency>
+
         <!-- Spring JDBC（默认实现查询 H2 seed 数据用，compile 保证 JdbcTemplate 类可用） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -163,10 +174,22 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
+                <version>3.14.0</version>
                 <configuration>
                     <source>${java.version}</source>
                     <target>${java.version}</target>
+                    <!-- JDK 21+ 的 javac 默认不执行注解处理（不再自动发现 classpath 上的处理器），
+                         必须显式设置 proc=full 并声明 annotationProcessorPaths，
+                         否则 Lombok 注解失效导致编译报“找不到符号 log/getter”。
+                         与根 pom 的编译配置方案保持一致。 -->
+                    <proc>full</proc>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
                 </configuration>
             </plugin>
         </plugins>
