@@ -75,6 +75,22 @@ public class SipProxyAutoConfiguration {
     // ==================== 坐席扩展点默认实现 ====================
 
     /**
+     * 注册 Jackson 2（com.fasterxml）ObjectMapper Bean。
+     * <p>
+     * 背景：Spring Boot 4.x 默认仅提供 Jackson 3（tools.jackson）的 ObjectMapper，
+     * 而本组件（SipSessionManager/SipNodeManager 等）通过 {@code @Resource} 注入的是 Jackson 2 的 ObjectMapper，
+     * 需显式注册该 Bean 供注入使用；父程序若已自定义 Jackson 2 ObjectMapper Bean 则自动覆盖。
+     *
+     * @return Jackson 2 ObjectMapper 实例
+     */
+    @Bean
+    @ConditionalOnMissingBean(com.fasterxml.jackson.databind.ObjectMapper.class)
+    public com.fasterxml.jackson.databind.ObjectMapper sipproxyJackson2ObjectMapper() {
+        log.info("[sipproxyJackson2ObjectMapper][注册 Jackson 2 ObjectMapper（Boot 4 默认仅 Jackson 3）]");
+        return new com.fasterxml.jackson.databind.ObjectMapper();
+    }
+
+    /**
      * 注册坐席信息查询默认实现
      * <p>
      * 启用条件：容器中不存在 {@link AgentInfoProvider} Bean 时注册。
