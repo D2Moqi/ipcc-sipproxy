@@ -106,13 +106,18 @@ public class SipByeRequestHandler extends AbstractSipRequestHandler {
         // 会话已建立, 刷新会话信息(保持会话活跃, 避免被淘汰清理)
         sessionManager.updateSessionInfo(sessionInfo);
 
-        // 方案A(2026-08-15): 会话内 BYE 按 SessionInfo 上下文校正来源(而非仅靠 Via IP 端口匹配)
-        // 根因: 内部呼叫(A-B坐席互拨)中 FS 挂断坐席B 腿时, 从 FS internal profile(如 15560)发出的
-        // BYE 源端口不匹配 FS 节点表 external 端口(如 15580), 且源IP(62.234.191.165)命中第三方网关
+        // 会话内 BYE 按 SessionInfo 上下文校正来源(而非仅靠 Via IP 端口匹配):
+        // 内部呼叫(A-B坐席互拨)中 FS 挂断坐席B 腿时, BYE 从 FS internal profile(如 15560)发出,
+        // 源端口不匹配 FS 节点表 external 端口(如 15580), 且源IP(62.234.191.165)命中第三方网关
         // (fs3 同公网IP) → identifySource 误判 THIRD_PARTY → 决策 (THIRD_PARTY,INTERNAL)→FREESWITCH
-        // 把 BYE 错误转回 FS → FS 回 481 → 坐席B 收不到正常挂断通知(场景5 保持降级链一环)。
-        // 校正: INTERNAL 呼叫无第三方参与, THIRD_PARTY 必为误判; 且 BYE To 用户为坐席分机(挂断坐席端)
-        // → 校正为 FREESWITCH → 决策 (FREESWITCH,INTERNAL)→WEBSOCKET 正确转发坐席B。
+        // 会把 BYE 错误转回 FS → FS 回 481 → 坐席B 收不到正常挂断通知。INTERNAL 呼叫无第三方参与,
+        // THIRD_PARTY 必为误判; 且 BYE To 用户为坐席分机(挂断坐席端) → 校正为 FREESWITCH →
+        // 决策 (FREESWITCH,INTERNAL)→WEBSOCKET 正确转发坐席B。
+        // 第三方软电话(pjsua, 注册域=FS公网IP)挂断时 BYE 从客户端通道进入(source=WEBSOCKET),
+        // 非坐席分支的"FS节点IP挂断号码端"兜底会因 fromDomain==FS节点IP 误判为 FREESWITCH →
+        // 决策 (FREESWITCH,INBOUND)→THIRD_PARTY 而第三方节点不存在 → BYE 被丢弃, FS 主叫腿
+        // 不挂断 → 坐席腿残留/CDR缺失。FS 不可能从客户端通道发 BYE, 故 source=WEBSOCKET 时
+        // 不做该兜底校正(与 UnifiedResponseHandler Via WS/WSS 跳过校正原则一致)。
         String correctedSource = correctSourceBySession(request, source, sessionInfo);
         if (!correctedSource.equals(source)) {
             log.info("[handleIncomingRequest][会话内BYE来源校正] callId={}, {} → {}", callId, source, correctedSource);
@@ -188,14 +193,18 @@ public class SipByeRequestHandler extends AbstractSipRequestHandler {
             // To 非坐席: 主叫/被叫号码挂断, 保持原识别(THIRD_PARTY 主叫挂断 → 转 FS 等)
             // 兜底: FS 从 internal profile 挂断号码端时, 源端口不匹配节点表 external 端口,
             // 且 From 域可能命中第三方网关共用公网 IP → 来源误判; From 域命中会话 FS 节点
-            // IP 时校正为 FREESWITCH, 避免 BYE 被误转回 FS 自身
+            // IP 时校正为 FREESWITCH, 避免 BYE 被误转回 FS 自身。
+            // 例外(2026-08-19): source=WEBSOCKET(客户端通道进入, 如第三方软电话 pjsua 挂断)时
+            // 不做校正——FS 不可能从 sipproxy 客户端通道发 BYE, fromDomain==FS节点IP 只是第三方
+            // 软电话注册域与 FS 共用公网 IP 的巧合, 校正会把 BYE 误判为 FS 挂断而丢弃(场景3 实测)。
             String byeFromUser = SipAnalysisUtil.extractFromUser(request);
             String byeFromDomain = SipAnalysisUtil.extractFromDomain(request);
             String[] splitByeFrom = StrUtil.isNotBlank(byeFromUser)
                     ? byeFromUser.split(String.valueOf(CharPool.AMP)) : new String[0];
             String byeFromDomainHost = splitByeFrom.length > 1
                     ? splitByeFrom[1] : stripPortFromHost(byeFromDomain);
-            if (sessionInfo.getFreeSwitchNode() != null
+            if (!SipProxyConstants.WEBSOCKET.equals(source)
+                    && sessionInfo.getFreeSwitchNode() != null
                     && StrUtil.isNotBlank(sessionInfo.getFreeSwitchNode().getSipIp())
                     && sessionInfo.getFreeSwitchNode().getSipIp().equals(byeFromDomainHost)
                     && !SipProxyConstants.FREESWITCH.equals(source)) {

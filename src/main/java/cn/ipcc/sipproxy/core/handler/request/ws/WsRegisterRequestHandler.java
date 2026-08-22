@@ -8,6 +8,8 @@ import cn.ipcc.sipproxy.api.trace.TraceContext;
 import cn.ipcc.sipproxy.core.annotation.SipMethod;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
 import cn.ipcc.sipproxy.defaults.authentication.DefaultSipAuthenticationProvider;
+import cn.ipcc.sipproxy.websocket.WsSessionManager;
+import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -75,6 +77,15 @@ public class WsRegisterRequestHandler extends AbstractWsSipRequestHandler {
     @Autowired(required = false)
     private AuthenticationCallback authenticationCallback;
 
+    /**
+     * WebSocket 会话管理器（校验旧会话存活，识别僵尸注册绑定）
+     * <p>
+     * 需求背景：连接关闭后注册绑定可能残留（Redis 清理失败/异常断开），
+     * 新 REGISTER 会被误判为"重复登录"拒绝，需先校验旧会话是否仍存活。
+     */
+    @Resource
+    private WsSessionManager wsSessionManager;
+
     @Override
     protected void doHandle(String sessionId, Request request, String callId) throws Exception {
         // 入口设置 traceId,实现全链路日志串联;优先复用 SIP 请求的 Call-ID,缺失时回退到 UUID
@@ -107,17 +118,27 @@ public class WsRegisterRequestHandler extends AbstractWsSipRequestHandler {
                 // 唯一登录检查：同一坐席是否已在其他地方登录
                 String existingSessionId = sessionManager.getSessionIdByUser(username, realm);
                 if (existingSessionId != null && !existingSessionId.equals(sessionId)) {
-                    log.warn("[doHandle][检测到重复登录] username={}, existingSessionId={}, newSessionId={}", username, existingSessionId, sessionId);
-                    boolean allowNewLogin = authenticationCallback.onDuplicateLogin(username, realm, existingSessionId, sessionId);
-                    if (!allowNewLogin) {
-                        log.info("[doHandle][重复登录被拒绝] username={}", username);
-                        send403Response(sessionId, request, "Duplicate Login");
-                        notifyFailure(username, realm, "该坐席已在其他地方登录，拒绝新登录");
-                        return;
+                    // 旧会话已关闭（僵尸绑定：连接关闭后 Redis 清理失败/异常断开残留）时，
+                    // 直接清理旧绑定并允许新注册——不询问 onDuplicateLogin，避免新坐席
+                    // 被已失效会话永久拒绝；存活判定基于本实例内存会话表，多实例部署时
+                    // 需换用 RedisWsSessionManager 保持判定与绑定同源
+                    if (!wsSessionManager.isSessionAlive(existingSessionId)) {
+                        log.warn("[doHandle][旧会话已关闭，清理僵尸注册绑定] username={}, existingSessionId={}, newSessionId={}",
+                                username, existingSessionId, sessionId);
+                        sessionManager.cleanupRegisterInfo(existingSessionId);
+                    } else {
+                        log.warn("[doHandle][检测到重复登录] username={}, existingSessionId={}, newSessionId={}", username, existingSessionId, sessionId);
+                        boolean allowNewLogin = authenticationCallback.onDuplicateLogin(username, realm, existingSessionId, sessionId);
+                        if (!allowNewLogin) {
+                            log.info("[doHandle][重复登录被拒绝] username={}", username);
+                            send403Response(sessionId, request, "Duplicate Login");
+                            notifyFailure(username, realm, "该坐席已在其他地方登录，拒绝新登录");
+                            return;
+                        }
+                        // 允许新登录，清理旧会话的注册信息
+                        log.info("[doHandle][强制登录，清理旧会话] username={}, existingSessionId={}", username, existingSessionId);
+                        sessionManager.cleanupRegisterInfo(existingSessionId);
                     }
-                    // 允许新登录，清理旧会话的注册信息
-                    log.info("[doHandle][强制登录，清理旧会话] username={}, existingSessionId={}", username, existingSessionId);
-                    sessionManager.cleanupRegisterInfo(existingSessionId);
                 }
                 send200OkResponse(sessionId, request);
                 sessionManager.cacheRegisterInfo(sessionId, username, realm);

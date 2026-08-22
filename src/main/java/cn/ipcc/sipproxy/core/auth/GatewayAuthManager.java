@@ -28,8 +28,8 @@ import java.util.Iterator;
  * 网关认证管理器
  * <p>
  * 设计意图：统一管理SIP网关的Digest鉴权逻辑，从SipMessageForwarder中剥离407处理职责，
- * 支持RFC 2617标准Digest鉴权和qop=auth增强模式，修复原实现中预注入无效Authorization头、
- * 不支持stale重挑战、无qop支持等问题。
+ * 支持RFC 2617标准Digest鉴权和qop=auth增强模式，处理预注入无效Authorization头、
+ * stale重挑战、qop不支持等场景。
  * <p>
  * 核心职责：
  * <ul>

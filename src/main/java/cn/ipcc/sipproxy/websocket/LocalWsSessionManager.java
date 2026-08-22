@@ -86,6 +86,12 @@ public class LocalWsSessionManager implements WsSessionManager {
                 username, domain, sessionId);
     }
 
+    @Override
+    public boolean isSessionAlive(String sessionId) {
+        WebSocketSession session = sessions.get(sessionId);
+        return session != null && session.isOpen();
+    }
+
     /**
      * 构建 userSessionMapping 的 Key
      *

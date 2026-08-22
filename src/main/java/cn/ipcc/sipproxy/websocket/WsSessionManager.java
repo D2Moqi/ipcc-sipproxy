@@ -65,4 +65,16 @@ public interface WsSessionManager {
      * @param domain    域名
      */
     void registerUser(String sessionId, String username, String domain);
+
+    /**
+     * 判断 WebSocket 会话是否仍存活（已注册且连接未关闭）
+     * <p>
+     * 需求背景：WebSocket 连接关闭后若注册绑定残留（Redis 清理失败/异常断开），
+     * 新 REGISTER 会被误判为"重复登录"拒绝。重复登录检测前先校验旧会话存活，
+     * 已关闭的僵尸绑定应允许新注册取代。
+     *
+     * @param sessionId 会话 ID
+     * @return true=会话存活（连接未关闭）；false=不存在或已关闭（僵尸绑定）
+     */
+    boolean isSessionAlive(String sessionId);
 }
