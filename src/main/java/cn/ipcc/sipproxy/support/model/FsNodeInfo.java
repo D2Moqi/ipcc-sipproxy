@@ -1,5 +1,7 @@
 package cn.ipcc.sipproxy.support.model;
 
+import cn.ipcc.sipproxy.support.SipProxyConstants;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
 /**
@@ -7,6 +9,7 @@ import lombok.Data;
  * <p>
  * 由父程序实现 {@code cn.ipcc.sipproxy.api.fs.FsNodeProvider} 时填充并返回。
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class FsNodeInfo {
 
@@ -22,6 +25,14 @@ public class FsNodeInfo {
     /** SIP 信令端口（通常 5060） */
     private Integer sipPort;
 
+    /**
+     * SIP 传输协议：1-UDP，2-TCP（非 2 一律按 UDP 处理）
+     * <p>
+     * 转发到 FS 的出站腿协议优先按此配置；未配置（null）时回退会话入站腿协议
+     * （INVITE Via transport），保持存量节点向后兼容。
+     */
+    private Integer transportProtocol;
+
     /** ESL IP（sipproxy 不直接使用，预留用于父程序拦截器调用 FsClient） */
     private String eslIp;
 
@@ -30,4 +41,16 @@ public class FsNodeInfo {
 
     /** 状态（0-禁用 1-启用，sipproxy 仅选用 status=1 的节点转发信令） */
     private Integer status;
+
+    /**
+     * 解析 FS 节点 SIP 传输协议字符串（tcp/udp）
+     * <p>
+     * 语义：transportProtocol 1=UDP（缺省），2=TCP，非 2 一律 UDP。
+     * 转发到 FS 的出站腿（forwardToFreeSwitch/doForwardToFreeSwitch）统一经此方法取值，
+     * 与 GatewayInfo.resolveSipTransport() 保持同源语义。
+     */
+    public String resolveSipTransport() {
+        return Integer.valueOf(2).equals(transportProtocol)
+                ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
+    }
 }

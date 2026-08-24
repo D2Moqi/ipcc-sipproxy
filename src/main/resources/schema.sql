@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS sip_fs_node (
     name VARCHAR(100) NOT NULL,
     sip_ip VARCHAR(50) NOT NULL,
     sip_port INT NOT NULL,
+    transport_protocol INT DEFAULT NULL,
     esl_ip VARCHAR(50),
     esl_port INT,
     status INT DEFAULT 1

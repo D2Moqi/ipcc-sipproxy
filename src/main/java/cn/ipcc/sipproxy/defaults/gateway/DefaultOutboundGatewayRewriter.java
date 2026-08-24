@@ -113,8 +113,7 @@ public class DefaultOutboundGatewayRewriter implements OutboundGatewayRewriter {
         try {
             int gatewayPort = gatewayInfo.getPort() != null ? gatewayInfo.getPort() : 5060;
             // transportProtocol：1=UDP（默认），2=TCP（与 cc_sipproxy_gateway 配置语义一致）
-            String transport = Integer.valueOf(2).equals(gatewayInfo.getTransportProtocol())
-                    ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
+            String transport = gatewayInfo.resolveSipTransport();
             // Route 发送目标 IP：网关配置了 toSipProxyIp 时优先使用（可选填，默认=网关地址）。
             // 背景（2026-08-15）：云厂商 NAT 模式下公网 IP 绑定在 lo，FreeSWITCH 的 sip-ip=0.0.0.0
             // 实际绑定内网 IP(10.2.0.14)。本机 sipproxy 发往 自身公网IP:端口 的包走 lo 无监听被丢弃；

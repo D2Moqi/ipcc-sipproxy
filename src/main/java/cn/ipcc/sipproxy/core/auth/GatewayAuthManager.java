@@ -7,6 +7,7 @@ import cn.ipcc.sipproxy.core.node.SipNodeManager;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.session.SipSessionManager;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
+import cn.ipcc.sipproxy.support.SipProxyConstants;
 import cn.ipcc.sipproxy.support.model.GatewayInfo;
 import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
@@ -163,8 +164,7 @@ public class GatewayAuthManager {
             if (gwNode == null && sessionInfo.getGatewayId() != null && !sessionInfo.getGatewayId().isEmpty()) {
                 gwNode = gatewayProvider.getGatewayById(sessionInfo.getGatewayId());
             }
-            String transport = (gwNode != null && Integer.valueOf(2).equals(gwNode.getTransportProtocol()))
-                    ? "tcp" : "udp";
+            String transport = (gwNode != null) ? gwNode.resolveSipTransport() : SipProxyConstants.TRANSPORT_UDP;
             SipProvider targetProvider = "tcp".equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
 
             // 重传407识别：已重发过(challengeCount>=1)且nonce未变化，说明这是FS按RFC3261事务重传规则

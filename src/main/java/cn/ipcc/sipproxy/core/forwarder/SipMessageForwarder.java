@@ -214,6 +214,9 @@ public class SipMessageForwarder {
 
                     log.info("[forwardToFreeSwitch][响应按FS出局原始Via回送(RFC3581)] callId={}, statusCode={}, 最终via={}, 投递目标fs={}:{}",
                             callId, response.getStatusCode(), restoredVia, node.getSipIp(), node.getSipPort());
+                    // 注意: 响应沿还原的 FS 原始 Via(实际腿协议)路由, 而发送通道协议由
+                    // doForwardToFreeSwitch 按节点 transportProtocol 选择; 节点配置与 FS 实际
+                    // 监听协议不一致时该响应可能发送失败(重传), 属防御性边界, 配置时应与实际一致
                     doForwardToFreeSwitch(response, node);
                     return;
                 } catch (Exception e) {
@@ -232,7 +235,10 @@ public class SipMessageForwarder {
                     triedNodes.size(), currentNode.getSipIp(), currentNode.getSipPort());
 
             try {
-                Message modifiedMessage = modifyHeadersForForwarding(message, currentNode.getSipIp(), currentNode.getSipPort(), triedNodes.size());
+                // FS 出站腿协议优先按节点配置(transport_protocol), 未配置回退会话入站腿协议;
+                // 作为 transportOverride 传入, 保证 Via/Contact transport 与发送通道一致
+                String fsTransport = resolveFsTransport(sessionManager.getSessionInfo(callId), currentNode);
+                Message modifiedMessage = modifyHeadersForForwarding(message, currentNode.getSipIp(), currentNode.getSipPort(), triedNodes.size(), fsTransport);
                 // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做 ICE 候选替换等）
                 modifiedMessage = sdpProcessor.process(modifiedMessage);
                 doForwardToFreeSwitch(modifiedMessage, currentNode);
@@ -368,6 +374,29 @@ public class SipMessageForwarder {
     }
 
     /**
+     * 解析转发到 FS 的出站腿传输协议
+     * <p>
+     * 优先级：FS 节点配置 transportProtocol（1=UDP，2=TCP，非 2 一律 UDP）> 会话入站腿
+     * toSipTransport（INVITE Via transport）> UDP 兜底。
+     * 需求背景：FS 腿协议应由 FS 节点实际监听协议决定（如 NPS 内网穿透仅支持 TCP），
+     * 而非主叫侧协议；存量节点未配置 transportProtocol 时回退现状（toSipTransport），
+     * 保证向后兼容不破坏既有部署。
+     *
+     * @param sessionInfo 会话信息（可能为 null，提供入站腿协议兜底）
+     * @param node        目标 FS 节点（提供配置协议优先项）
+     * @return 传输协议字符串（tcp/udp）
+     */
+    private String resolveFsTransport(SessionInfo sessionInfo, FsNodeInfo node) {
+        if (node != null && node.getTransportProtocol() != null) {
+            return node.resolveSipTransport();
+        }
+        if (sessionInfo != null && sessionInfo.getToSipTransport() != null) {
+            return sessionInfo.getToSipTransport();
+        }
+        return SipProxyConstants.TRANSPORT_UDP;
+    }
+
+    /**
      * 实际的FreeSWITCH转发逻辑（无故障转移）
      *
      * @param message SIP消息
@@ -378,11 +407,8 @@ public class SipMessageForwarder {
                 node.getSipIp(), node.getSipPort(), message.getClass().getSimpleName());
 
         String callId = SipAnalysisUtil.getCallId(message);
-        String transport = SipProxyConstants.TRANSPORT_UDP;
-        SessionInfo sessionInfo = sessionManager.getSessionInfo(callId);
-        if (sessionInfo != null && sessionInfo.getToSipTransport() != null) {
-            transport = sessionInfo.getToSipTransport();
-        }
+        // FS 出站腿协议: 节点配置优先(transport_protocol), 未配置回退会话入站腿协议, UDP 兜底
+        String transport = resolveFsTransport(sessionManager.getSessionInfo(callId), node);
 
         SipProvider targetProvider = SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
         log.info("[doForwardToFreeSwitch][选择传输协议] transport={}, provider={}", transport,
@@ -424,17 +450,22 @@ public class SipMessageForwarder {
     public void forwardToThirdParty(Message message, GatewayInfo node) throws Exception {
         // node 可能为 null: 原生 SIP 终端直连入局且来源 IP 未匹配网关列表时,
         // 响应回送依赖 inboundTopVia + 入站连接注册表,不依赖网关节点;请求类消息仍必须指定节点
+        // transport 语义差异:
+        //   - 响应分支/INBOUND 回送: 沿入站腿协议(toSipTransport=INVITE Via transport, UDP 兜底,
+        //     RFC3261 §18.2.2 连接导向传输同路径回送), 与网关配置无关
+        //   - 请求分支非 INBOUND(出局腿/无会话 fallback): 按网关自身协议(transport_protocol)选择,
+        //     与 forwardToOutboundGateway 同源, 见下方请求分支判定
         log.info("[forwardToThirdParty][开始转发消息到第三方SIP服务] tp={}:{}, message={}",
                 node != null ? node.getAddress() : "inbound(入站连接)",
                 node != null ? node.getPort() : null, message.getClass().getSimpleName());
 
         String callId = SipAnalysisUtil.getCallId(message);
+        SessionInfo sessionInfo = callId != null ? sessionManager.getSessionInfo(callId) : null;
+        // 响应回送第三方必须沿入站腿协议(toSipTransport=INVITE Via transport, UDP 兜底,
+        // 含 RFC3581 入站 Via 还原回送)——保持现状勿改; 请求分支在下方按场景覆盖
         String transport = SipProxyConstants.TRANSPORT_UDP;
-        if (callId != null) {
-            SessionInfo sessionInfo = sessionManager.getSessionInfo(callId);
-            if (sessionInfo != null && sessionInfo.getToSipTransport() != null) {
-                transport = sessionInfo.getToSipTransport();
-            }
+        if (sessionInfo != null && sessionInfo.getToSipTransport() != null) {
+            transport = sessionInfo.getToSipTransport();
         }
 
         SipProvider targetProvider = SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(transport) ? sipProviderTcp : sipProvider;
@@ -507,7 +538,25 @@ public class SipMessageForwarder {
             }
             String targetIp = node.getAddress();
             Integer targetPort = node.getPort() != null ? node.getPort() : 5060;
-            Message modifiedMessage = modifyHeadersForForwarding(message, targetIp, targetPort, 0);
+            // 出局 in-dialog 请求（ACK/BYE/UPDATE 等）目标为出局网关时，发送通道与 Via/Contact
+            // transport 按网关自身协议（transport_protocol：1=UDP，2=TCP）决定，与 FS 腿
+            // toSipTransport 解耦——与 forwardToOutboundGateway/DefaultOutboundGatewayRewriter/
+            // GatewayAuthManager 同源。否则 FS 腿 TCP 时误走 sipProviderTcp 发往 UDP 网关端口，信令丢失。
+            // 仅当网关显式配置 transport_protocol 且呼叫为出局方向时才覆盖：未配置（存量网关）
+            // 与 INBOUND 场景（FS→第三方主叫回送）保持 toSipTransport（入站腿协议，RFC3261
+            // §18.2.2），与 resolveFsTransport 的"未配置回退入站腿"语义一致，避免存量行为漂移
+            String callType = sessionInfo != null ? sessionInfo.getCallType() : null;
+            boolean isOutboundLeg = SipProxyConstants.CALL_TYPE_OUTBOUND.equals(callType)
+                    || SipProxyConstants.CALL_TYPE_INTERNAL.equals(callType);
+            if (node != null && node.getTransportProtocol() != null && isOutboundLeg) {
+                transport = node.resolveSipTransport();
+                targetProvider = SipProxyConstants.TRANSPORT_TCP.equalsIgnoreCase(transport)
+                        ? sipProviderTcp : sipProvider;
+                log.info("[forwardToThirdParty][请求按网关自身协议选择发送通道] callId={}, method={}, transportProtocol={}, transport={}",
+                        callId, message instanceof Request request ? request.getMethod() : message.getClass().getSimpleName(),
+                        node.getTransportProtocol(), transport);
+            }
+            Message modifiedMessage = modifyHeadersForForwarding(message, targetIp, targetPort, 0, transport);
             // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做 ICE 候选替换等）
             modifiedMessage = sdpProcessor.process(modifiedMessage);
             if (modifiedMessage instanceof Request request) {
@@ -613,6 +662,8 @@ public class SipMessageForwarder {
 
     /**
      * 修改SIP消息头以便正确转发到FreeSWITCH或第三方SIP服务
+     * <p>内部无调用方(所有转发路径均显式传 transportOverride), 保留仅为兼容外部集成方;
+     * 传 null 时 Via/Contact 的 transport 取会话入站腿协议(sessionInfo.getToSipTransport())
      */
     public Message modifyHeadersForForwarding(Message message, String targetIp, Integer targetPort, int attemptCount)
             throws Exception {
@@ -623,8 +674,10 @@ public class SipMessageForwarder {
      * 修改SIP消息头以便正确转发到FreeSWITCH或第三方SIP服务
      *
      * @param transportOverride 传输协议覆盖项: 非空时 Via/Contact 的 transport 使用该值,
-     *                          不再取 sessionInfo.getToSipTransport()(出局网关腿的
-     *                          transport 必须按网关自身协议,与 FS 腿 transport 解耦)
+     *                          不再取 sessionInfo.getToSipTransport()。
+     *                          适用场景: 出局网关腿的 transport 必须按网关自身协议
+     *                          (forwardToOutboundGateway 出局 INVITE 与 forwardToThirdParty
+     *                          出局 in-dialog 请求 ACK/BYE 均传覆盖值),与 FS 腿 transport 解耦
      */
     public Message modifyHeadersForForwarding(Message message, String targetIp, Integer targetPort, int attemptCount,
                                               String transportOverride)
@@ -946,9 +999,9 @@ public class SipMessageForwarder {
         // 与 FS→代理腿的 sessionInfo.getToSipTransport() 解耦。若 FS 腿切 TCP 后
         // 误随会话 transport 选了 sipProviderTcp,而 Route 头 transport=udp(网关协议),
         // JAIN-SIP 无法为 udp 目标创建 TCP 通道 → Could not create a message channel → FS 腿 408。
-        // Route 头(DefaultOutboundGatewayRewriter)已同源取网关协议,此处统一收敛
-        String transport = Integer.valueOf(2).equals(gateway.getTransportProtocol())
-                ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
+        // Route 头(DefaultOutboundGatewayRewriter)已同源取网关协议,此处统一经
+        // GatewayInfo.resolveSipTransport() 取值(非 2 一律 UDP)
+        String transport = gateway.resolveSipTransport();
 
         modifyHeadersForForwarding(request, gatewayIp, gatewayPort, 0, transport);
         // 代理回程 IP 适配（toSipProxyIp）：出局 INVITE 的 Via/Contact 头中"代理自身地址"

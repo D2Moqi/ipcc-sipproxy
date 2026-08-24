@@ -1,5 +1,7 @@
 package cn.ipcc.sipproxy.support.model;
 
+import cn.ipcc.sipproxy.support.SipProxyConstants;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Data;
 
 /**
@@ -14,6 +16,7 @@ import lombok.Data;
  * <p>
  * 由父程序实现 {@code cn.ipcc.sipproxy.api.gateway.GatewayProvider} 时填充并返回。
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 @Data
 public class GatewayInfo {
 
@@ -60,8 +63,22 @@ public class GatewayInfo {
      */
     private Integer authType;
 
-    /** SIP传输协议：1-UDP，2-TCP（INVITE 发送与 407 鉴权重发均使用此字段） */
+    /** SIP传输协议：1-UDP，2-TCP（INVITE 发送与 407 鉴权重发均使用此字段，非 2 一律按 UDP 处理） */
     private Integer transportProtocol;
+
+    /**
+     * 解析网关 SIP 传输协议字符串（tcp/udp）
+     * <p>
+     * 语义：transportProtocol 1=UDP（缺省），2=TCP，非 2 一律 UDP。
+     * 出局 INVITE 发送通道（forwardToOutboundGateway）、Route 头注入
+     * （DefaultOutboundGatewayRewriter）、407 重发通道（GatewayAuthManager）以及
+     * 出局 in-dialog 请求（ACK/BYE）转发（forwardToThirdParty）统一经此方法取值，
+     * 避免各处重复 Integer.valueOf(2).equals(...) 判断漂移。
+     */
+    public String resolveSipTransport() {
+        return Integer.valueOf(2).equals(transportProtocol)
+                ? SipProxyConstants.TRANSPORT_TCP : SipProxyConstants.TRANSPORT_UDP;
+    }
 
     /** 认证地址（预留字段，可为空；当前 INVITE 407 鉴权流程不使用，后续 REGISTER 场景可用） */
     private String authAddress;
