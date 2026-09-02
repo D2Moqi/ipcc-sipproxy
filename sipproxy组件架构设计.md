@@ -22,7 +22,7 @@ sipproxy 的核心职责对应方案文档中"SIP 代理服务"组件的五项�
 
 ### 1.2 B2BUA 特征
 
-依据方案文档 2.1「B2BUA 角色定位说明」，B2BUA 与 SIP Proxy 的本质区别在代码中的体现：
+依据方案文档 2.2「B2BUA 角色定位说明」，B2BUA 与 SIP Proxy 的本质区别在代码中的体现：
 
 - **两段独立对话**：sipproxy 在 INVITE 流程中先接收坐席侧 INVITE（一段对话），再由 ESL 层 `originate` 驱动 FS 发起第二段 INVITE 回注到 sipproxy（另一段对话）。两段 INVITE 使用不同 Call-ID。
 - **状态维护**：`SessionInfo.callId` / `sessionId` / `freeSwitchNode` / `thirdPartyNode` / `callType` 字段记录了对话级状态，由 `SipSessionManager` 持久化到 Redis。
@@ -509,7 +509,7 @@ forwardResponse(response, target, sessionInfo)：
 | FREESWITCH        | WEBSOCKET  | WEBSOCKET  | THIRD\_PARTY |
 | THIRD\_PARTY      | FREESWITCH | FREESWITCH | FREESWITCH   |
 
-策略语义解释（与方案文档第 6.2.3、7.2 节呼应）：
+策略语义解释（与方案文档场景 2/3 响应处理节 7.3/8.3 呼应）：
 
 - **WEBSOCKET 来源响应**：坐席 JsSIP 发的响应（如 200 OK）一律转发到 FS，由 FS 处理媒体锚定
 - **FREESWITCH 来源响应**：
@@ -605,7 +605,7 @@ sessionManager.getSessionIdByUser(username, domain) → sessionId
 
 #### 4.2.4 `forwardToOutboundGateway(request, gatewayId)` —— 豁免场景直接出局
 
-依据方案文档第 3.5 节「三个豁免场景」，该方法处理"FS 源 INVITE 携带 X-Gateway-Id"的快速出局：
+依据方案文档 3.5 节「豁免场景与直发场景清单」，该方法处理"FS 源 INVITE 携带 X-Gateway-Id"的快速出局：
 
 ```text
 forwardToOutboundGateway(request, gatewayId)
@@ -873,7 +873,7 @@ sourceStrategy.get(callType) → target
 
 #### 5.1.1 坐席发起（WsInviteRequestHandler）
 
-**触发场景**：方案文档场景一（内部呼叫）、场景二（出局呼叫）的第一段 INVITE。
+**触发场景**：方案文档场景 1（内部呼叫）、场景 2（出局呼叫）的第一段 INVITE。
 
 **处理逻辑**：
 
@@ -900,9 +900,9 @@ sourceStrategy.get(callType) → target
 
 **触发场景**：
 
-- 方案文档场景三（入局呼叫）：第三方网关 → sipproxy
-- 方案文档场景一/二/三的第二段 INVITE：FS → sipproxy（ESL originate 回注）
-- 方案文档场景四/五/六/七的豁免场景：FS → sipproxy（携带 X-Gateway-Id）
+- 方案文档场景 3（入局 IVR）：第三方网关 → sipproxy
+- 方案文档场景 1/2/3 的第二段 INVITE：FS → sipproxy（ESL originate 回注）
+- 方案文档 3.5 豁免场景清单（三方会议/双向出局/REFER 携网关直发）：FS → sipproxy（携带 X-Gateway-Id）
 
 **处理逻辑**：
 
@@ -924,7 +924,7 @@ sourceStrategy.get(callType) → target
 5. **豁免分支**（关键）：`FREESWITCH.equals(source) && StrUtil.isNotBlank(gatewayId)`
    - 调用 `messageForwarder.forwardToOutboundGateway(request, gatewayId)` → 直接出局改写
    - **跳过 FS park + 号码路由 + IVR 流程**
-   - 适用方案文档场景四/五/六/七
+   - 适用方案文档 3.5 豁免场景清单（三方会议/双向出局/REFER 携网关直发）
 6. **快速推 WebSocket 分支**：`FREESWITCH.equals(source) && StrUtil.isBlank(gatewayId)` + 被叫是已注册坐席
    - `agentInfoProvider.getAgent(toUser, null)` 非 null → 已注册 JsSIP 坐席
    - `selectFreeSwitchNodeByViaPort(callId, viaPort)` 按 Via 端口覆盖 freeSwitchNode
@@ -934,7 +934,7 @@ sourceStrategy.get(callType) → target
 
 ### 5.2 BYE 处理（B2BUA 两段挂断）
 
-依据方案文档 5.4 节「BYE 挂断流程」与 B2BUA 角色定位，BYE 在两段对话中分别独立处理。
+依据方案文档 6.4 节「BYE 挂断流程」与 B2BUA 角色定位，BYE 在两段对话中分别独立处理。
 
 #### 5.2.1 坐席挂断（WsByeRequestHandler）
 
@@ -971,7 +971,7 @@ sourceStrategy.get(callType) → target
 
 ### 5.3 REFER 处理（转接）
 
-依据方案文档第十一章「场景六：坐席间通话中转接到外部手机」实现。
+依据方案文档 v4.0 第十章「场景 6：咨询转接」及 3.5 豁免场景清单（REFER 携 X-Gateway-Id 直发外线）实现。
 
 #### 5.3.1 解耦设计
 
@@ -1031,7 +1031,7 @@ sipproxy 模块**不再连接 FreeSWITCH**，所有 ESL 编排（originate/bridg
 
 ### 5.6 PRACK/UPDATE/INFO 等会话内方法（SipDefaultRequestHandler / WsDefaultRequestHandler）
 
-依据方案文档 M3「PRACK / UPDATE 专门处理」已修复项实现，是 sipproxy 模块的关键改造点。
+依据方案文档 23.2 节（PRACK/100rel 透传要求）已实现，是 sipproxy 模块的关键改造点。
 
 #### 5.6.1 改造前问题
 
@@ -1087,7 +1087,8 @@ handle(request, callId, source)
 #### 5.6.4 关键设计点
 
 - **复用 ResponseForwardingStrategy**：与会话内响应转发共享同一策略表，保证 source × callType → target 决策一致
-- **SIP 头原样透传**：未对 Require/RSeq/RAck 等 100rel 相关头域做特殊处理，自动保留（方案文档 17.2 节"透传 Require: 100rel / RSeq / RAck 头域"要求）
+- **SIP 头原样透传**：未对 Require/RSeq/RAck 等 100rel 相关头域做特殊处理，自动保留（方案文档 23.2 节"透传 Require:
+  100rel / RSeq / RAck 头域"要求）
 - **SessionInfo 刷新**：会话已建立时调用 `updateSessionInfo` 刷新会话，避免被 Redis TTL 淘汰清理
 - **Fallback 兜底**：Call-ID 缺失或 SessionInfo 不存在时，fallback 到按 To 头查注册转发，保证未走 sipproxy 完整建立的会话向后兼容
 
@@ -1128,7 +1129,8 @@ handle(request, callId, source)
 
 **说明**：
 
-- SessionInfo 的销毁由 ESL 层 `CHANNEL_HANGUP_COMPLETE` 事件处理器统一完成，sipproxy 的 BYE 处理器不参与清理（依据方案文档 5.4 节）
+- SessionInfo 的销毁由 ESL 层 `CHANNEL_HANGUP_COMPLETE` 事件处理器统一完成，sipproxy 的 BYE 处理器不参与清理（依据方案文档
+  6.4 节）
 - TTL=120s 的设计保证会话活跃期间不会被淘汰，会话内方法到达时还会 `updateSessionInfo` 刷新 TTL
 
 ### 6.2 节点绑定策略
@@ -1415,7 +1417,7 @@ sipproxy:
 
 ### 11.1 B2BUA 头域改写
 
-依据方案文档 2.1 节 B2BUA 角色定位，sipproxy 需要在两段对话中独立改写头域，保证：
+依据方案文档 2.2 节 B2BUA 角色定位，sipproxy 需要在两段对话中独立改写头域，保证：
 
 1. **Contact/Via 替换为 SIP 代理地址**：后续信令能正确路由回 sipproxy
 2. **Request-URI 修改为目标节点地址**：消息能送达目标 FS/第三方网关
@@ -1440,7 +1442,7 @@ sipproxy:
 
 #### 11.1.3 出局信令改写 `OutboundGatewayRewriter.rewrite`
 
-依据方案文档 6.2.2 节，向第三方网关出局时执行改写（默认实现 3 步，父程序可自定义）：
+依据方案文档 3.5 节（豁免直发）与场景 2 出局处理（7.3），向第三方网关出局时执行改写（默认实现 3 步，父程序可自定义）：
 
 | 步骤 | 头域                  | 改写规则                                                                                  |
 | -- | ------------------- | ------------------------------------------------------------------------------------- |
@@ -1467,7 +1469,8 @@ sipproxy:
 
 ### 11.3 豁免场景识别
 
-依据方案文档 3.5 节「三个豁免场景」，sipproxy 在 `SipInviteRequestHandler.handle()` 中识别"FS 源 + 携带 X-Gateway-Id"组合：
+依据方案文档 3.5 节「豁免场景与直发场景清单」，sipproxy 在 `SipInviteRequestHandler.handle()` 中识别"FS 源 + 携带
+X-Gateway-Id"组合：
 
 ```java
 // 1. callType 标记阶段
@@ -1508,7 +1511,8 @@ messageForwarder.forwardToFreeSwitch(request, freeSwitchNode);
 
 ### 11.4 ESL 全权控制
 
-依据方案文档第二章「FreeSWITCH 仅作为'哑'媒体服务器」与第十四章「ESL 全权控制能力」的设计，sipproxy 不做呼叫决策，全部 park 到 FS 由 ESL 控制。
+依据方案文档第二章「FreeSWITCH 仅作为'哑'媒体服务器」与第二十章节 20.3「ESL 全权控制能力」的设计，sipproxy 不做呼叫决策，全部
+park 到 FS 由 ESL 控制。
 
 **代码体现**：
 
@@ -1522,13 +1526,14 @@ messageForwarder.forwardToFreeSwitch(request, freeSwitchNode);
    - 响应按 `ResponseForwardingStrategy` 策略表转发
 3. **sipproxy 不参与媒体处理**：
    - 不处理 RTP/SDP 媒体协商（由 FS 完成，`SdpProcessor` 默认透传）
-   - 不参与 ICE 协商（方案文档 17.4 节"SIP 代理不参与 ICE 协商，但需确保 SDP 透传完整"）
+   - 不参与 ICE 协商（方案文档 23.4 节"SIP 代理不参与 ICE 协商，但需确保 SDP 透传完整"）
    - 仅协调媒体路径决策（通过 ESL originate/uuid\_bridge 确保 FS 作为媒体锚点）
 4. **sipproxy 不直连 FreeSWITCH ESL**：
    - REFER 转接等需 ESL 编排的场景通过 `SipMessageInterceptor` 扩展点委托父程序实现
    - 模块本身不依赖 `FsClient`/`FsCallCacheService` 等 ESL 客户端
 
-**唯一例外**：豁免场景（场景四/五）下，sipproxy 直接 `forwardToOutboundGateway` 出局，跳过 FS park + 号码路由 + IVR，但仍不参与媒体处理（媒体仍经 FS 中继，由 ESL originate 锚定）。
+**唯一例外**：豁免场景（三方会议/双向出局，见方案文档 3.5）下，sipproxy 直接 `forwardToOutboundGateway` 出局，跳过 FS park +
+号码路由 + IVR，但仍不参与媒体处理（媒体仍经 FS 中继，由 ESL originate 锚定）。
 
 ### 11.5 SessionInfo 上下文来源校正
 
@@ -1543,16 +1548,18 @@ messageForwarder.forwardToFreeSwitch(request, freeSwitchNode);
 
 ### 12.1 已实现的设计
 
-| 方案文档要求                                                     | 代码现状                                                                  | 状态  |
-| ---------------------------------------------------------- | --------------------------------------------------------------------- | --- |
-| 6.3 第三方网关返回 407 Proxy Auth 时重新注入 Authorization 头并重发 INVITE | `GatewayAuthManager.handle407Challenge` 已实现：从 407 响应提取 realm/nonce/qop/algorithm/stale，从 `GatewayInfo` 获取凭证，按 RFC 2617 计算 Digest（支持无 qop 和 qop=auth 两种模式），注入 `Proxy-Authorization` 重发 INVITE，`authChallengeCount` + `last407Nonce` 防循环（MAX=2） | 已实现 |
-| 14.6 Timer B 按网关 ID 维度可配置                                  | `GatewayInfo.retrySeconds` 等字段已定义，`forwardToOutboundGateway` 转发前记录配置日志。**限制**：JAIN SIP 不支持运行时按事务动态调整 Timer B，实际值由 SipStack 全局配置决定 | 已实现（含限制） |
-| 17.4 ICE 协商中 SDP 透传完整性保证                                   | `SipMessageForwarder.validateIceCandidateInSdp` 已实现：`modifyHeadersForForwarding` 末尾校验 SDP，包含 `a=ice-ufrag` 但无 `a=candidate` 时记录 warn 日志 | 已实现 |
-| 17.2 M3 PRACK/UPDATE 专门处理 | `SipDefaultRequestHandler` / `WsDefaultRequestHandler` 已改造为按 Call-ID 查 `SessionInfo` + 复用 `ResponseForwardingStrategy` 决策转发，`modifyHeadersForForwarding` 仅改写 Contact/Via/Request-URI，RSeq/RAck/Require 等 100rel 头域原样透传 | 已修复 |
+| 方案文档要求                                                               | 代码现状                                                                                                                                                                                                                                                                              | 状态             |
+|----------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------|
+| 7.4 第三方网关返回 407 Proxy Auth 时重新注入 Authorization 头并重发 INVITE | `GatewayAuthManager.handle407Challenge` 已实现：从 407 响应提取 realm/nonce/qop/algorithm/stale，从 `GatewayInfo` 获取凭证，按 RFC 2617 计算 Digest（支持无 qop 和 qop=auth 两种模式），注入 `Proxy-Authorization` 重发 INVITE，`authChallengeCount` + `last407Nonce` 防循环（MAX=2） | 已实现           |
+| 19.3 Timer B 按网关 ID 维度可配置                                          | `GatewayInfo.retrySeconds` 等字段已定义，`forwardToOutboundGateway` 转发前记录配置日志。**限制**：JAIN SIP 不支持运行时按事务动态调整 Timer B，实际值由 SipStack 全局配置决定                                                                                                         | 已实现（含限制） |
+| 23.4 ICE 协商中 SDP 透传完整性保证                                         | `SipMessageForwarder.validateIceCandidateInSdp` 已实现：`modifyHeadersForForwarding` 末尾校验 SDP，包含 `a=ice-ufrag` 但无 `a=candidate` 时记录 warn 日志                                                                                                                             | 已实现           |
+| 23.2 PRACK/UPDATE 专门处理                                                 | `SipDefaultRequestHandler` / `WsDefaultRequestHandler` 已改造为按 Call-ID 查 `SessionInfo` + 复用 `ResponseForwardingStrategy` 决策转发，`modifyHeadersForForwarding` 仅改写 Contact/Via/Request-URI，RSeq/RAck/Require 等 100rel 头域原样透传                                        | 已修复           |
 
 > **已移除至未来演进**：
-> - **4.2 FS 故障切换已 bridge 通话恢复**：复杂度极高，依赖媒体路径切换和 ESL originate 重建呼叫腿，FS 自身 RTP 超时检测可兜底，详见方案文档 15.3。
-> - **17.1 Session Timer B2BUA 两侧维护**：复杂度极高，需双段独立维护 re-INVITE 调度，FS 已有 `session-timeout-sec` 配置兜底，详见方案文档 15.3。
+> - **4.2 FS 故障切换已 bridge 通话恢复**：复杂度极高，依赖媒体路径切换和 ESL originate 重建呼叫腿，FS 自身 RTP
+    超时检测可兜底，详见方案文档 21.2。
+> - **23.1 Session Timer B2BUA 两侧维护**：复杂度极高，需双段独立维护 re-INVITE 调度，FS 已有 `session-timeout-sec`
+    配置兜底，详见方案文档 21.2。
 
 <br />
 
@@ -1664,4 +1671,5 @@ messageForwarder.forwardToFreeSwitch(request, freeSwitchNode);
 
 ***
 
-> **文档说明**：本文档基于 ipcc-sipproxy 模块代码（独立 Spring Boot 模块，包名 `cn.ipcc.sipproxy`）与《SIP通信系统信令与话务流程方案》v3.0 生成，所有分析点均有代码或文档依据。如代码或方案文档后续更新，本文档需同步更新。
+> **文档说明**：本文档基于 ipcc-sipproxy 模块代码（独立 Spring Boot 模块，包名 `cn.ipcc.sipproxy`）与《SIP通信系统信令与话务流程方案》v4.0
+> 生成，所有分析点均有代码或文档依据。如代码或方案文档后续更新，本文档需同步更新。
