@@ -7,9 +7,11 @@ import cn.ipcc.sipproxy.api.agent.AgentInfoProvider;
 import cn.ipcc.sipproxy.api.fs.FsNodeProvider;
 import cn.ipcc.sipproxy.api.gateway.GatewayProvider;
 import cn.ipcc.sipproxy.api.gateway.MessageSourceIdentifier;
+import cn.ipcc.sipproxy.core.register.GatewayRegistry;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
 import cn.ipcc.sipproxy.support.SipProxyConstants;
 import cn.ipcc.sipproxy.support.model.AgentInfo;
+import cn.ipcc.sipproxy.support.model.GatewayRegisterInfo;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
 import cn.ipcc.sipproxy.support.model.GatewayInfo;
 import lombok.extern.slf4j.Slf4j;
@@ -60,18 +62,23 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
     private final GatewayProvider gatewayProvider;
     private final AgentInfoProvider agentInfoProvider;
 
+    /** 网关注册绑定管理器（REGISTER 特判与注册绑定匹配维度依赖） */
+    private final GatewayRegistry gatewayRegistry;
+
     /**
      * 构造方法注入 FS 节点、网关、坐席查询扩展点
      *
      * @param fsNodeProvider    FS 节点查询扩展点（用于校验来源 IP 是否为 FS 节点）
      * @param gatewayProvider   网关查询扩展点（用于校验来源 IP 是否为第三方网关）
      * @param agentInfoProvider 坐席信息查询扩展点（用于校验 From 头是否为坐席）
+     * @param gatewayRegistry   网关注册绑定管理器（注册模式网关识别）
      */
     public DefaultMessageSourceIdentifier(FsNodeProvider fsNodeProvider, GatewayProvider gatewayProvider,
-                                          AgentInfoProvider agentInfoProvider) {
+                                          AgentInfoProvider agentInfoProvider, GatewayRegistry gatewayRegistry) {
         this.fsNodeProvider = fsNodeProvider;
         this.gatewayProvider = gatewayProvider;
         this.agentInfoProvider = agentInfoProvider;
+        this.gatewayRegistry = gatewayRegistry;
     }
 
     /**
@@ -129,6 +136,27 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
             return SipProxyConstants.FREESWITCH;
         }
 
+        // 第 0.5 层：REGISTER 特判——按 From user(注册账号)反查网关，命中即 THIRD_PARTY。
+        // 需求背景：注册型 4G 网关与自有 FS 可能共用出口 IP（测试环境模拟网关与 fs1/fs2 同机
+        // 62.234.191.165），若按源 IP 匹配会在第 3 层被误判为自有 FS(FREESWITCH)，
+        // 网关注册处理器(SipRegisterRequestHandler)将拒绝处理。REGISTER 的 From user 即
+        // 注册账号，账号维度与 IP 归属无关，必须置于 FS 节点 IP 匹配之前。
+        String method = null;
+        if (message instanceof javax.sip.message.Request req) {
+            method = req.getMethod();
+        }
+        if (SipAnalysisUtil.REGISTER.equals(method)) {
+            String regUser = SipAnalysisUtil.getFromUser(message);
+            if (StrUtil.isNotBlank(regUser)) {
+                GatewayInfo regGw = gatewayProvider.getGatewayByUsername(regUser);
+                if (regGw != null) {
+                    log.debug("[identifySource][REGISTER命中网关注册账号] regUser={}, gatewayId={}",
+                            regUser, regGw.getId());
+                    return SipProxyConstants.THIRD_PARTY;
+                }
+            }
+        }
+
         String userAgent = message.getHeader(UserAgentHeader.NAME) != null
                 ? message.getHeader(UserAgentHeader.NAME).toString()
                 : "";
@@ -177,7 +205,10 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
         // 而正确映射是 (FREESWITCH, INBOUND)→THIRD_PARTY 回给外部主叫。
         // Response 的方向决策由 ResponseForwardingStrategy + SessionInfo 上下文校正负责。
         boolean isRequest = message instanceof javax.sip.message.Request;
-        String method = isRequest ? ((javax.sip.message.Request) message).getMethod() : null;
+        String methodForMatch = isRequest ? ((javax.sip.message.Request) message).getMethod() : null;
+        if (method == null) {
+            method = methodForMatch;
+        }
         String fromDomain = null;
         if (isRequest) {
             try {
@@ -186,30 +217,17 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
                 log.debug("[identifySource][提取From domain异常,忽略该匹配维度] msg={}", e.getMessage());
             }
         }
+        // in-dialog 请求判定（To 头携带 tag）：dialog 内请求（BYE/INFO/UPDATE/ACK）来源即
+        // dialog 对端，注册绑定维度③（源 IP == Contact IP）对其无区分意义——同机部署时
+        // 自有 FS 的 in-dialog 请求源 IP 恰与注册网关 Contact IP 相同，若参与 2.5 层匹配
+        // 会被误判为注册网关(THIRD_PARTY)导致方向决策漂移；in-dialog 请求统一交给
+        // 第 3/3.5 层 FS 节点判定与 SessionInfo 上下文校正。
+        boolean inDialogRequest = isInDialogRequest(message);
 
         if (sourceIp != null && !sourceIp.isEmpty()) {
-            // 第3层：匹配自有 FS 节点 (sipIp + sipPort 精确匹配)
-            // 注意: 不使用 From domain 匹配 FS —— 自有 FS 与第三方网关常共用公网 IP
-            // (如 62.234.191.165), 仅凭 From domain 的 IP 无法区分; 且自有 FS 直连
-            // sipproxy, Via 源 IP 一定是 FS 内网/公网地址, 精确匹配可靠。
-            // 若 From domain 也参与 FS 匹配, 外部软电话(From domain=网关公网IP)会被
-            // 误判为 FREESWITCH 而非 THIRD_PARTY, 导致 callType=INTERNAL 走错路由。
+            // FS 节点列表与归属预判（源 IP / From domain 命中自有 FS 节点 IP，忽略端口）：
+            // 提前计算供第 2.5 层（注册绑定）与第 3/3.5 层（自有 FS）共用，避免重复遍历。
             List<FsNodeInfo> allFreeSwitchNodes = fsNodeProvider.listFsNodes();
-            if (allFreeSwitchNodes != null) {
-                for (FsNodeInfo fsNode : allFreeSwitchNodes) {
-                    if (matchesNodeEndpoint(sourceIp, sourcePort, fsNode.getSipIp(), fsNode.getSipPort())) {
-                        log.debug("[identifySource][命中FS节点IP+端口] sourceIp={}:{}, node={}",
-                                sourceIp, sourcePort, fsNode.getName());
-                        return SipProxyConstants.FREESWITCH;
-                    }
-                }
-            }
-            // 第4层前置排除: 自有 FS 与第三方网关可能共用公网 IP(如 62.234.191.165), 而 FS 从
-            // internal profile 发出请求时源端口不匹配节点表 external 端口, 第3层 IP+端口精确
-            // 匹配会失败; 此时若 From domain 恰为网关公网地址, 第4层会把 FS 源误判为 THIRD_PARTY。
-            // 处理: sourceIp 命中自有 FS IP(忽略端口) → 直接判定 FREESWITCH(Via 源 IP 必为 FS 自身);
-            // fromDomain 命中自有 FS IP → 仅跳过第4层的 From domain 维度(源IP仍可匹配网关),
-            // 避免外部软电话(From domain=共用公网IP)被误判 THIRD_PARTY。
             boolean sourceIpHitFs = false;
             boolean fromDomainHitFs = false;
             if (allFreeSwitchNodes != null) {
@@ -225,6 +243,53 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
                     }
                 }
             }
+            // 第 2.5 层：注册绑定匹配（Request 专用，置于 FS 节点匹配之前）。
+            // 匹配维度：① From user 命中注册账号索引；② From domain(去端口) 或源 IP 命中注册 Contact IP。
+            // 需求背景：注册型网关呼入 INVITE 的源 IP 可能与自有 FS 相同（模拟网关同机部署），
+            // 第 3 层「源 IP 命中自有 FS(忽略端口)」会误判为 FREESWITCH；注册绑定层以
+            // Contact/账号维度识别，不受 IP 归属干扰。
+            //
+            // 跳过条件（任一命中即不匹配注册绑定）：
+            // 1) in-dialog 请求（To 头带 tag）——FS 来源 in-dialog 请求（BYE/INFO 等）源 IP
+            //    恰与注册 Contact IP 相同的同机场景，必须按 FS 节点判定，否则呼叫路由漂移；
+            // 2) 携带 X-Gateway-Id 头 —— 自有 FS originate 出局腿的标志（SipInviteRequestHandler 的
+            //    快出逃生通道, 场景四/五/六/七 快速出局），FS 出局 INVITE 的源 IP 恰与注册
+            //    绑定 Contact IP 相同时，若不跳过会把 FS 自己的出局腿误判为注册网关呼入；
+            // 3) 源 IP 命中自有 FS 节点（忽略端口）——FS 内部回环 INVITE（未携带任何自定义头，
+            //    内部转接等）与注册网关同机共存时的歧义场景，保持存量 FS 判定优先，
+            //    避免新增 2.5 层引入回归（注册网关呼入仍可经维度② From domain 命中）。
+            Long registeredGwId = null;
+            if (isRequest && !inDialogRequest && message.getHeader("X-Gateway-Id") == null && !sourceIpHitFs) {
+                registeredGwId = tryMatchRegisteredGateway(message, sourceIpHitFs, fromDomainHitFs);
+            } else {
+                log.debug("[identifySource][跳过注册绑定匹配] inDialog={}, xGatewayId={}, sourceIpHitFs={}",
+                        inDialogRequest, message.getHeader("X-Gateway-Id") != null, sourceIpHitFs);
+            }
+            if (registeredGwId != null) {
+                log.debug("[identifySource][命中网关注册绑定] gatewayId={}", registeredGwId);
+                return SipProxyConstants.THIRD_PARTY;
+            }
+            // 第 3 层：匹配自有 FS 节点 (sipIp + sipPort 精确匹配)
+            // 注意: 不使用 From domain 匹配 FS —— 自有 FS 与第三方网关常共用公网 IP
+            // (如 62.234.191.165), 仅凭 From domain 的 IP 无法区分; 且自有 FS 直连
+            // sipproxy, Via 源 IP 一定是 FS 内网/公网地址, 精确匹配可靠。
+            // 若 From domain 也参与 FS 匹配, 外部软电话(From domain=网关公网IP)会被
+            // 误判为 FREESWITCH 而非 THIRD_PARTY, 导致 callType=INTERNAL 走错路由。
+            if (allFreeSwitchNodes != null) {
+                for (FsNodeInfo fsNode : allFreeSwitchNodes) {
+                    if (matchesNodeEndpoint(sourceIp, sourcePort, fsNode.getSipIp(), fsNode.getSipPort())) {
+                        log.debug("[identifySource][命中FS节点IP+端口] sourceIp={}:{}, node={}",
+                                sourceIp, sourcePort, fsNode.getName());
+                        return SipProxyConstants.FREESWITCH;
+                    }
+                }
+            }
+            // 第4层前置排除: 自有 FS 与第三方网关可能共用公网 IP(如 62.234.191.165), 而 FS 从
+            // internal profile 发出请求时源端口不匹配节点表 external 端口, 第3层 IP+端口精确
+            // 匹配会失败; 此时若 From domain 恰为网关公网地址, 第4层会把 FS 源误判为 THIRD_PARTY。
+            // 处理: sourceIp 命中自有 FS IP(忽略端口) → 直接判定 FREESWITCH(Via 源 IP 必为 FS 自身);
+            // fromDomain 命中自有 FS IP → 仅跳过第4层的 From domain 维度(源IP仍可匹配网关),
+            // 避免外部软电话(From domain=共用公网IP)被误判 THIRD_PARTY。
             if (sourceIpHitFs) {
                 log.debug("[identifySource][源IP命中自有FS节点(忽略端口), 识别为FREESWITCH] sourceIp={}", sourceIp);
                 return SipProxyConstants.FREESWITCH;
@@ -304,6 +369,81 @@ public class DefaultMessageSourceIdentifier implements MessageSourceIdentifier {
             return hostWithPort.substring(0, lastColon);
         }
         return hostWithPort;
+    }
+
+    /**
+     * 判断 SIP 消息是否为 in-dialog 请求（To 头携带 tag）
+     * <p>
+     * dialog 内请求（BYE/INFO/UPDATE/ACK 等）的 To 头必带 tag 参数；初始请求（如
+     * 第三方呼入 INVITE）的 To 头无 tag。来源识别据此区分「注册网关新呼入」与
+     * 「自有 FS 的 in-dialog 回程请求」，避免同机部署场景下的误判。
+     *
+     * @param message SIP 消息
+     * @return true=in-dialog 请求
+     */
+    private static boolean isInDialogRequest(Message message) {
+        if (!(message instanceof javax.sip.message.Request)) {
+            return false;
+        }
+        javax.sip.header.ToHeader toHeader =
+                (javax.sip.header.ToHeader) message.getHeader(javax.sip.header.ToHeader.NAME);
+        return toHeader != null && StrUtil.isNotBlank(toHeader.getTag());
+    }
+
+    /**
+     * 注册绑定匹配（第 2.5 层）
+     * <p>
+     * 匹配维度（任一命中即返回网关 ID）：
+     * <ol>
+     *   <li>From user == 注册账号（gatewayRegistry 账号索引）</li>
+     *   <li>From domain(去端口) == 注册 Contact IP（FS 归属预判命中时排除该维度）</li>
+     *   <li>源 IP == 注册 Contact IP（FS 归属预判命中时排除该维度）</li>
+     * </ol>
+     * 仅对 Request 生效；Response 的方向决策由 ResponseForwardingStrategy + SessionInfo 校正负责。
+     *
+     * @param message         SIP 消息
+     * @param sourceIpHitFs   源 IP 是否命中自有 FS 节点（命中时维度③无区分意义，排除）
+     * @param fromDomainHitFs From domain 是否命中自有 FS 节点（命中时维度②无区分意义，排除）
+     * @return 命中网关 ID，未命中返回 null
+     */
+    private Long tryMatchRegisteredGateway(Message message, boolean sourceIpHitFs, boolean fromDomainHitFs) {
+        if (!(message instanceof javax.sip.message.Request) || gatewayRegistry == null) {
+            return null;
+        }
+        try {
+            // 维度①：From user 命中注册账号索引
+            String fromUser = SipAnalysisUtil.getFromUser(message);
+            if (StrUtil.isNotBlank(fromUser)) {
+                Long gwId = gatewayRegistry.getGatewayIdByUsername(fromUser);
+                if (gwId != null) {
+                    return gwId;
+                }
+            }
+            // 维度②③：遍历注册模式网关比对 From domain / 源 IP
+            List<GatewayInfo> gateways = gatewayProvider.listEnabledGateways();
+            if (gateways == null) {
+                return null;
+            }
+            String fromDomain = stripPortFromHost(SipAnalysisUtil.getFromDomain(message));
+            String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(message);
+            for (GatewayInfo gw : gateways) {
+                if (gw.getRegisterEnabled() == null || !Integer.valueOf(1).equals(gw.getRegisterEnabled())) {
+                    continue;
+                }
+                GatewayRegisterInfo reg = gatewayRegistry.get(Long.valueOf(gw.getId()));
+                if (reg == null || StrUtil.isBlank(reg.getContactIp())) {
+                    continue;
+                }
+                boolean domainHit = !fromDomainHitFs && reg.getContactIp().equals(fromDomain);
+                boolean sourceHit = !sourceIpHitFs && reg.getContactIp().equals(sourceIp);
+                if (domainHit || sourceHit) {
+                    return Long.valueOf(gw.getId());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[tryMatchRegisteredGateway][注册绑定匹配异常,忽略] msg={}", e.getMessage());
+        }
+        return null;
     }
 
     /**

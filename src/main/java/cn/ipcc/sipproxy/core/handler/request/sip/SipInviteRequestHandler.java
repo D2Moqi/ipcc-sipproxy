@@ -4,14 +4,18 @@ import cn.hutool.core.text.CharPool;
 import cn.hutool.core.util.IdUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.core.util.URLUtil;
+import cn.ipcc.sipproxy.api.gateway.GatewayProvider;
 import cn.ipcc.sipproxy.api.trace.TraceContext;
 import cn.ipcc.sipproxy.core.annotation.SipMethod;
+import cn.ipcc.sipproxy.core.register.GatewayRegistry;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.utils.SipAnalysisUtil;
 import cn.ipcc.sipproxy.support.SipProxyConstants;
 import cn.ipcc.sipproxy.support.model.AgentInfo;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
 import cn.ipcc.sipproxy.support.model.GatewayInfo;
+import cn.ipcc.sipproxy.support.model.GatewayRegisterInfo;
+import jakarta.annotation.Resource;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -19,6 +23,7 @@ import org.springframework.stereotype.Component;
 import javax.sip.header.Header;
 import javax.sip.message.Request;
 import javax.sip.message.Response;
+import java.util.List;
 
 /**
  * 传入INVITE请求处理器
@@ -42,6 +47,14 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
      */
     @Autowired(required = false)
     private TraceContext traceContext;
+
+    /** 网关查询扩展点（注册绑定动态节点构建用） */
+    @Resource
+    private GatewayProvider gatewayProvider;
+
+    /** 网关注册绑定管理器（注册型网关节点动态构建） */
+    @Resource
+    private GatewayRegistry gatewayRegistry;
 
     /**
      * 处理传入INVITE请求
@@ -124,6 +137,20 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
                 // 来源 IP 未匹配网关列表时 thirdPartyNode 为 null,响应回送退化为按入站 Via/入站连接
                 String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
                 GatewayInfo thirdPartyNode = nodeManager.selectThirdPartyNode(callId, sourceIp);
+                if (thirdPartyNode == null) {
+                    // 注册模式兜底:按注册绑定动态构建节点(注册模式网关未配置静态 address 时,
+                    // in-dialog 请求(BYE/ACK)依赖 thirdPartyNode 转发,必须保证非空)
+                    GatewayRegisterInfo reg = resolveRegisterBinding(request);
+                    if (reg != null) {
+                        thirdPartyNode = new GatewayInfo();
+                        thirdPartyNode.setId(String.valueOf(reg.getGatewayId()));
+                        thirdPartyNode.setAddress(reg.getContactIp());
+                        thirdPartyNode.setPort(reg.getContactPort());
+                        thirdPartyNode.setTransportProtocol("tcp".equals(reg.getTransport()) ? 2 : 1);
+                        log.info("[handleIncomingRequest][按注册绑定构建第三方节点] gatewayId={}, contact={}:{}",
+                                reg.getGatewayId(), reg.getContactIp(), reg.getContactPort());
+                    }
+                }
                 if (thirdPartyNode != null) {
                     sessionInfo.setThirdPartyNode(thirdPartyNode);
                 }
@@ -367,6 +394,67 @@ public class SipInviteRequestHandler extends AbstractSipRequestHandler {
             log.warn("[isWebSocketTransport][解析Via transport异常,按非WebSocket处理] callId={}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * 按消息匹配注册绑定（呼入 INVITE 用）
+     * <p>
+     * 匹配维度：From user 注册账号索引 > From domain(去端口)/源 IP 命中注册 Contact IP。
+     * 预期结果：返回命中网关的注册绑定，未命中返回 null。
+     *
+     * @param request 呼入 INVITE
+     * @return 注册绑定，未命中返回 null
+     */
+    private GatewayRegisterInfo resolveRegisterBinding(Request request) {
+        if (gatewayRegistry == null) {
+            return null;
+        }
+        try {
+            // 维度①：From user 命中注册账号索引
+            String fromUser = SipAnalysisUtil.extractFromUser(request);
+            if (StrUtil.isNotBlank(fromUser)) {
+                Long gwId = gatewayRegistry.getGatewayIdByUsername(fromUser);
+                GatewayRegisterInfo reg = gwId != null ? gatewayRegistry.get(gwId) : null;
+                if (reg != null) {
+                    return reg;
+                }
+            }
+            // 维度②③：遍历注册模式网关比对 From domain / 源 IP
+            List<GatewayInfo> gateways = gatewayProvider != null ? gatewayProvider.listEnabledGateways() : null;
+            if (gateways != null) {
+                String fromDomain = stripPort(SipAnalysisUtil.extractFromDomain(request));
+                String sourceIp = SipAnalysisUtil.getSourceIpFromMessage(request);
+                for (GatewayInfo gw : gateways) {
+                    if (gw.getRegisterEnabled() == null || !Integer.valueOf(1).equals(gw.getRegisterEnabled())) {
+                        continue;
+                    }
+                    GatewayRegisterInfo reg = gatewayRegistry.get(Long.valueOf(gw.getId()));
+                    if (reg != null && (reg.getContactIp().equals(fromDomain) || reg.getContactIp().equals(sourceIp))) {
+                        return reg;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[resolveRegisterBinding][注册绑定匹配异常] msg={}", e.getMessage());
+        }
+        return null;
+    }
+
+    /**
+     * 去除域名中的端口号，返回纯 host 部分
+     * <p>
+     * 设计说明：SIP From/To 头的 host 可能是 host:port 格式（如 62.234.191.165:5561），
+     * 与注册绑定的 contactIp（纯 IP）比较前需剥离端口。
+     *
+     * @param domain 域名（可能带端口）
+     * @return 去除端口后的纯 host；入参为空返回 null
+     */
+    private String stripPort(String domain) {
+        if (StrUtil.isBlank(domain)) {
+            return null;
+        }
+        int colon = domain.lastIndexOf(':');
+        return colon > 0 ? domain.substring(0, colon) : domain;
     }
 
     /**

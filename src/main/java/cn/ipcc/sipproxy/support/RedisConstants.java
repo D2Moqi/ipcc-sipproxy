@@ -41,6 +41,13 @@ public final class RedisConstants {
     /** Call-ID → 第三方节点信息（TTL: REFRESH_TIME） */
     public static final String SESSION_THIRD_PARTY_MAPPING_PREFIX = "ipcc:sipproxy:session:thirdparty:";
 
+    /** 网关注册绑定：gatewayId → GatewayRegisterInfo JSON（TTL=注册 Expires 余量，周期刷新动态续期） */
+    public static final String GATEWAY_REGISTER_PREFIX = "ipcc:sipproxy:gateway:register:";
+    /** 网关注册账号索引：username → gatewayId（供 REGISTER 认证反查与来源识别） */
+    public static final String GATEWAY_REGISTER_USER_PREFIX = "ipcc:sipproxy:gateway:register:user:";
+    /** REGISTER Digest nonce 票据：nonce → realm（TTL=nonce 有效期，一次性使用防重放） */
+    public static final String SIP_NONCE_PREFIX = "ipcc:sipproxy:register:nonce:";
+
     private RedisConstants() {
     }
 }

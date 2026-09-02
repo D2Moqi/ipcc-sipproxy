@@ -38,4 +38,18 @@ public interface GatewayProvider {
      * @return 启用的网关列表（空列表表示无配置）
      */
     List<GatewayInfo> listEnabledGateways();
+
+    /**
+     * 按注册账号查询网关（REGISTER 认证与来源识别用）
+     * <p>
+     * 设计要求：定义为 default 方法（缺省返回 null），避免破坏既有 GatewayProvider
+     * 实现类编译（DefaultGatewayProvider、example 模块 CustomGatewayProvider 等），
+     * 父程序实现覆盖即可支持注册型网关。
+     *
+     * @param username 注册账号（SIP REGISTER From/Authorization username）
+     * @return 网关信息（不存在/禁用/未实现时返回 null）
+     */
+    default GatewayInfo getGatewayByUsername(String username) {
+        return null;
+    }
 }

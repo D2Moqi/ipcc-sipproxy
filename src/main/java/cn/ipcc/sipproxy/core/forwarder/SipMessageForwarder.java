@@ -3,9 +3,11 @@ package cn.ipcc.sipproxy.core.forwarder;
 import cn.ipcc.sipproxy.api.gateway.GatewayProvider;
 import cn.ipcc.sipproxy.api.gateway.OutboundGatewayRewriter;
 import cn.ipcc.sipproxy.api.media.SdpProcessor;
+import cn.hutool.core.util.StrUtil;
 import cn.ipcc.sipproxy.autoconfigure.SipProxyProperties;
 import cn.ipcc.sipproxy.core.auth.GatewayAuthManager;
 import cn.ipcc.sipproxy.core.node.SipNodeManager;
+import cn.ipcc.sipproxy.core.register.GatewayRegistry;
 import cn.ipcc.sipproxy.core.session.FsInboundChannelRegistry;
 import cn.ipcc.sipproxy.core.session.SessionInfo;
 import cn.ipcc.sipproxy.core.session.SipSessionManager;
@@ -15,6 +17,7 @@ import cn.ipcc.sipproxy.support.SipProxyErrorCodeConstants;
 import cn.ipcc.sipproxy.support.SipProxyException;
 import cn.ipcc.sipproxy.support.model.FsNodeInfo;
 import cn.ipcc.sipproxy.support.model.GatewayInfo;
+import cn.ipcc.sipproxy.support.model.GatewayRegisterInfo;
 import cn.ipcc.sipproxy.websocket.WsSessionManager;
 import jakarta.annotation.Resource;
 import lombok.Setter;
@@ -75,6 +78,9 @@ public class SipMessageForwarder {
     private OutboundGatewayRewriter outboundGatewayRewriter;
 
     @Resource
+    private GatewayRegistry gatewayRegistry;
+
+    @Resource
     private SdpProcessor sdpProcessor;
 
     @Resource
@@ -129,6 +135,21 @@ public class SipMessageForwarder {
 
         log.info("[forwardToFreeSwitch][开始转发消息到FreeSWITCH] fs={}:{}, callId={}",
                 node.getSipIp(), node.getSipPort(), callId);
+
+        // 缓存 in-dialog 请求(INFO/BYE/UPDATE 等非 INVITE)的原始顶层 Via（按 CSeq 序号索引）：
+        // 响应回送第三方时必须还原为对应请求自身的 Via(各请求 branch 独立)，否则网关 sofia
+        // 按 branch 无法关联事务，丢弃 200 OK 后持续重传(重传风暴阻塞后续 BYE 发送，
+        // 坐席侧挂断联动延迟可达数十秒)。仅 Request 且非 INVITE 需要缓存；
+        // 经 SipSessionManager.updateInboundDialogTopVia 串行化读-改-写，防并发丢失更新。
+        if (message instanceof Request req && !Request.INVITE.equalsIgnoreCase(req.getMethod())) {
+            Long cseq = SipAnalysisUtil.getCSeqNumber(req);
+            String topVia = SipAnalysisUtil.getTopViaBody(req);
+            if (cseq != null && topVia != null) {
+                sessionManager.updateInboundDialogTopVia(callId, cseq, topVia);
+                log.info("[forwardToFreeSwitch][缓存in-dialog请求原始顶层Via] callId={}, method={}, cseq={}, via={}",
+                        callId, req.getMethod(), cseq, topVia);
+            }
+        }
 
         // 出局方向(第三方网关→FS)的响应必须按 RFC3581 发往原始 FS 出局 INVITE
         // 顶层 Via 的 received:rport(即发起 originate 的 CC FS 实例实际发送端口,如 15580/16580)。
@@ -480,7 +501,23 @@ public class SipMessageForwarder {
                 // 持续重传 INVITE 直至 408。改为还原会话缓存的入局原始顶层 Via 后直接发送,
                 // 响应不做 Request-URI/Contact 改写(响应无 Request-URI,Contact 保持原样回送)
                 SessionInfo responseSession = callId != null ? sessionManager.getSessionInfo(callId) : null;
+                // in-dialog 请求(INFO/BYE/UPDATE 等非 INVITE)的响应须还原为对应请求自身的顶层 Via
+                // (各请求 branch 独立)：网关 sofia 按 branch 关联事务，若复用 INVITE 的 inboundTopVia
+                // 会因 branch 不匹配丢弃 200 OK → 持续重传风暴阻塞后续请求。INVITE 响应仍走 RFC3581。
                 String inboundTopVia = responseSession != null ? responseSession.getInboundTopVia() : null;
+                CSeqHeader respCSeqHeader = (CSeqHeader) response.getHeader(CSeqHeader.NAME);
+                if (respCSeqHeader != null && !Request.INVITE.equalsIgnoreCase(respCSeqHeader.getMethod())) {
+                    String dialogVia = responseSession != null
+                            ? responseSession.getInboundDialogTopVia(Long.valueOf(respCSeqHeader.getSeqNumber())) : null;
+                    if (dialogVia != null && !dialogVia.isEmpty()) {
+                        inboundTopVia = dialogVia;
+                        log.info("[forwardToThirdParty][in-dialog响应按请求自身Via还原] callId={}, method={}, cseq={}, via={}",
+                                callId, respCSeqHeader.getMethod(), respCSeqHeader.getSeqNumber(), dialogVia);
+                    } else {
+                        log.warn("[forwardToThirdParty][in-dialog响应未缓存原请求Via,回退INVITE Via] callId={}, method={}, cseq={}",
+                                callId, respCSeqHeader.getMethod(), respCSeqHeader.getSeqNumber());
+                    }
+                }
                 if (inboundTopVia != null && !inboundTopVia.isEmpty()) {
                     try {
                         Header inboundVia = headerFactory.createHeader(ViaHeader.NAME, inboundTopVia);
@@ -987,27 +1024,62 @@ public class SipMessageForwarder {
             throw new SipProxyException(SipProxyErrorCodeConstants.GATEWAY_NOT_FOUND,
                     "网关不存在: " + gatewayId);
         }
+        // 防御性拷贝：后续会用注册绑定地址回填 address/port/transportProtocol 并传扩展点
+        // rewriteForOutbound，直接改写 provider 返回实例会污染“按 ID 缓存实例”的自研实现
+        // （共享状态泄漏到后续请求）。统一复制副本再回填，规避扩展点实例复用契约依赖。
+        GatewayInfo gatewayCopy = new GatewayInfo();
+        cn.hutool.core.bean.BeanUtil.copyProperties(gateway, gatewayCopy);
+        gateway = gatewayCopy;
 
-        String gatewayIp = gateway.getAddress();
-        int gatewayPort = gateway.getPort() != null ? gateway.getPort() : 5060;
+        // ===== 注册模式目标解析：注册 Contact > 静态配置 =====
+        // 注册型网关（registerEnabled=1）优先使用 REGISTER 绑定的可达地址；绑定缺失（过期/未注册）
+        // 时回退静态 address:port（若配置了）；两者皆无报错阻断出局，避免发往空地址
+        String targetIp = gateway.getAddress();
+        Integer targetPort = gateway.getPort();
+        String targetTransport = gateway.resolveSipTransport();
+        if (Integer.valueOf(1).equals(gateway.getRegisterEnabled())) {
+            GatewayRegisterInfo reg = gatewayRegistry.get(Long.valueOf(gatewayId));
+            if (reg != null) {
+                targetIp = reg.getContactIp();
+                targetPort = reg.getContactPort();
+                targetTransport = reg.getTransport();
+                log.info("[forwardToOutboundGateway][命中注册绑定] gatewayId={}, contact={}:{}, transport={}",
+                        gatewayId, targetIp, targetPort, targetTransport);
+            } else if (StrUtil.isBlank(targetIp)) {
+                log.error("[forwardToOutboundGateway][注册型网关未在线(无注册绑定)且未配置静态地址] gatewayId={}", gatewayId);
+                throw new SipProxyException(SipProxyErrorCodeConstants.GATEWAY_NOT_FOUND,
+                        "注册型网关未在线(无注册绑定)且未配置静态地址: " + gatewayId);
+            } else {
+                log.warn("[forwardToOutboundGateway][注册绑定缺失,回退静态配置] gatewayId={}, address={}:{}",
+                        gatewayId, targetIp, targetPort);
+            }
+        }
+        if (StrUtil.isBlank(targetIp)) {
+            log.error("[forwardToOutboundGateway][网关地址为空(注册模式未注册)] gatewayId={}", gatewayId);
+            throw new SipProxyException(SipProxyErrorCodeConstants.GATEWAY_NOT_FOUND,
+                    "网关地址为空(注册模式未注册): " + gatewayId);
+        }
+        String gatewayIp = targetIp;
+        int gatewayPort = targetPort != null ? targetPort : 5060;
 
         String callId = SipAnalysisUtil.getCallId(request);
         SessionInfo sessionInfo = sessionManager.getSessionInfo(callId);
 
-        // 出局网关腿的 transport/provider 必须按网关自身协议
-        // (cc_sipproxy_gateway.transport_protocol: 1=UDP, 2=TCP, 缺省 UDP)决定,
-        // 与 FS→代理腿的 sessionInfo.getToSipTransport() 解耦。若 FS 腿切 TCP 后
-        // 误随会话 transport 选了 sipProviderTcp,而 Route 头 transport=udp(网关协议),
-        // JAIN-SIP 无法为 udp 目标创建 TCP 通道 → Could not create a message channel → FS 腿 408。
-        // Route 头(DefaultOutboundGatewayRewriter)已同源取网关协议,此处统一经
-        // GatewayInfo.resolveSipTransport() 取值(非 2 一律 UDP)
-        String transport = gateway.resolveSipTransport();
+        // 出局网关腿的 transport/provider 按「注册绑定 transport > 网关配置 transport_protocol」解析
+        // （注册绑定在上一段已解析; 此处直接用解析值, 与 Route 头(DefaultOutboundGatewayRewriter)
+        //  同源, 避免 FS 腿切 TCP 后误随会话 transport 选错 provider 导致 408）
+        String transport = targetTransport;
 
         modifyHeadersForForwarding(request, gatewayIp, gatewayPort, 0, transport);
         // 代理回程 IP 适配（toSipProxyIp）：出局 INVITE 的 Via/Contact 头中"代理自身地址"
         // 使用网关配置的 toSipProxyIp（可选填），告知第三方网关应向该 IP 回送响应/后续请求。
         // 不填时保持 modifyHeadersForForwarding 写入的 sip.public-ip（默认行为）。
         rewriteViaContactProxyIp(request, gateway);
+        // 回填解析后的目标地址，保证 DefaultOutboundGatewayRewriter 的 Request-URI/Route
+        // 改写使用注册绑定地址（扩展点接口不感知注册逻辑，网关对象由 getGatewayById 每次新建，回填安全）
+        gateway.setAddress(targetIp);
+        gateway.setPort(gatewayPort);
+        gateway.setTransportProtocol("tcp".equalsIgnoreCase(transport) ? 2 : 1);
         rewriteForOutbound(request, gateway, gatewayId);
         // 委托 SdpProcessor 扩展点处理 SDP（默认透传，父程序可覆盖做编解码过滤等）
         Message processedMessage = sdpProcessor.process(request);

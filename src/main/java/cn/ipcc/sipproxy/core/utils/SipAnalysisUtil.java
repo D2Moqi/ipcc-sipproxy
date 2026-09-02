@@ -651,4 +651,50 @@ public class SipAnalysisUtil {
             return null;
         }
     }
+
+    /**
+     * 提取 SIP 请求/响应的 CSeq 序号
+     * <p>
+     * 供 in-dialog 请求（INFO/BYE 等）按 CSeq 索引其原始顶层 Via 缓存使用——
+     * 同一会话内多个 in-dialog 事务各自拥有独立 branch/CSeq，响应回送时必须
+     * 还原为对应请求自身的顶层 Via，否则对端 sofia 无法按 branch 关联事务。
+     *
+     * @param message SIP 消息
+     * @return CSeq 序号；无 CSeq 头或解析失败返回 null
+     */
+    public static Long getCSeqNumber(Message message) {
+        try {
+            CSeqHeader cseq = (CSeqHeader) message.getHeader(CSeqHeader.NAME);
+            return cseq != null ? Long.valueOf(cseq.getSeqNumber()) : null;
+        } catch (Exception e) {
+            log.debug("[getCSeqNumber][提取CSeq序号失败] msg={}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 提取 SIP 消息顶层 Via 的值部分（不含 "Via: " 名称前缀）
+     * <p>
+     * 供 in-dialog 请求转发前缓存原始顶层 Via：修改头域（modifyHeadersForForwarding）
+     * 会重建 Via 栈，必须先于改写提取原文，响应回送时才能按 RFC3581 还原对端可达地址。
+     *
+     * @param message SIP 消息
+     * @return 顶层 Via 值文本；无 Via 头或解析异常返回 null
+     */
+    public static String getTopViaBody(Message message) {
+        try {
+            Header viaHeader = message.getHeader(ViaHeader.NAME);
+            if (viaHeader == null) {
+                return null;
+            }
+            String viaStr = viaHeader.toString().trim();
+            if (viaStr.regionMatches(true, 0, "Via:", 0, 4)) {
+                return viaStr.substring(4).trim();
+            }
+            return viaStr;
+        } catch (Exception e) {
+            log.warn("[getTopViaBody][提取顶层Via头异常]", e);
+            return null;
+        }
+    }
 }

@@ -104,4 +104,13 @@ public class GatewayInfo {
     /** 状态：0-启用，1-禁用；按 ID 查询后必须校验 status=0 方可用于出局 */
     private Integer status;
 
+    /** 注册模式：0-IP直连（静态配置），1-注册模式（REGISTER 自动学习地址） */
+    private Integer registerEnabled;
+
+    /** 注册域（REGISTER Digest realm；缺省回退 fromDomain → sip.public-ip） */
+    private String registerRealm;
+
+    /** 注册有效期上限（秒，null 按 7200 兜底，限制网关请求的超长 Expires） */
+    private Integer registerMaxExpires;
+
 }

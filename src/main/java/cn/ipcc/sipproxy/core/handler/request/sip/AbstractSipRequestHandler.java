@@ -36,6 +36,12 @@ public abstract class AbstractSipRequestHandler extends AbstractSipHandler {
     protected HeaderFactory headerFactory;
 
     /**
+     * JAIN-SIP 协议栈实例（可选注入；用于按消息查询已存在事务，配合服务端事务响应发送）
+     */
+    @Setter
+    protected javax.sip.SipStack sipStack;
+
+    /**
      * 处理传入的SIP请求
      *
      * @param request SIP请求

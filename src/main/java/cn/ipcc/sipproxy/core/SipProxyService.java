@@ -7,6 +7,7 @@ import cn.ipcc.sipproxy.api.security.SipRateLimiter;
 import cn.ipcc.sipproxy.core.auth.GatewayAuthManager;
 import cn.ipcc.sipproxy.core.forwarder.SipMessageForwarder;
 import cn.ipcc.sipproxy.core.handler.request.sip.AbstractSipRequestHandler;
+import cn.ipcc.sipproxy.core.handler.request.sip.SipRegisterRequestHandler;
 import cn.ipcc.sipproxy.core.handler.request.sip.SipRequestHandlerFactory;
 import cn.ipcc.sipproxy.core.handler.request.ws.AbstractWsSipRequestHandler;
 import cn.ipcc.sipproxy.core.handler.request.ws.WsSipRequestHandlerFactory;
@@ -76,6 +77,9 @@ public class SipProxyService implements SipListener {
 
     @Resource
     private GatewayAuthManager gatewayAuthManager;
+
+    @Resource
+    private SipRegisterRequestHandler sipRegisterRequestHandler;
 
     @Resource
     private MessageSourceIdentifier messageSourceIdentifier;
@@ -192,6 +196,10 @@ public class SipProxyService implements SipListener {
         messageForwarder.setSipStack(sipStack);
 
         gatewayAuthManager.init(headerFactory, addressFactory, sipProvider, sipProviderTcp);
+
+        // 注入 SIP Provider/协议栈到网关注册处理器（REGISTER 响应经服务端事务回送）
+        sipRegisterRequestHandler.setSipProvider(sipProvider);
+        sipRegisterRequestHandler.setSipStack(sipStack);
     }
 
     /**

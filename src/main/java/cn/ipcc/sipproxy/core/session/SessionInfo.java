@@ -167,6 +167,69 @@ public class SessionInfo {
      */
     private Long outboundFsCSeq;
 
+    /**
+     * 入局 in-dialog 请求（INFO/BYE/UPDATE 等非 INVITE 方法）的顶层 Via 缓存：CSeq 序号 → Via 原文
+     * <p>
+     * 业务背景：第三方网关（如注册型 4G 网关/模拟网关）在通话期间可能发起 INFO 等
+     * in-dialog 请求，其响应回送时必须携带<b>该请求自身事务的顶层 Via</b>（各请求
+     * 拥有独立 branch），否则网关 sofia 按 branch 无法关联事务，丢弃 200 OK 后持续
+     * 重传（风暴阻塞后续 BYE 发送，坐席侧挂断联动延迟数十秒）。
+     * <p>
+     * 取值规则：转发 in-dialog 请求到 FS 前，按请求 CSeq 序号缓存其顶层 Via 原文；
+     * 响应回送第三方时按响应 CSeq 序号查表还原（INVITE 事务响应仍走 inboundTopVia）。
+     * <p>
+     * 持久化策略：随 SessionInfo 序列化存入 Redis，跨请求/响应周期有效；
+     * 缓存随会话清理，无需独立 TTL。
+     */
+    private java.util.Map<Long, String> inboundDialogTopViaByCSeq = new java.util.HashMap<>();
+
+    /** 入局 in-dialog Via 缓存容量上限：长通话 + 高频 INFO（DTMF 上报等）下防止 map 无界增长与随会话序列化的写放大 */
+    private static final int MAX_INBOUND_DIALOG_VIA_CACHE = 50;
+
+    /**
+     * 缓存入局 in-dialog 请求的顶层 Via（按 CSeq 序号索引）
+     * <p>
+     * 容量约束：超出 {@link #MAX_INBOUND_DIALOG_VIA_CACHE} 时移除最小 CSeq 条目
+     * （最旧请求的 Via，其响应早已回送，保留无意义），避免长通话下 map 无限膨胀。
+     *
+     * @param cseq   CSeq 序号（同一事务重传 CSeq 不变，覆盖写入）
+     * @param via    该请求的顶层 Via 原文（不含 "Via: " 前缀）
+     */
+    public void cacheInboundDialogTopVia(Long cseq, String via) {
+        if (cseq != null && via != null && !via.isEmpty()) {
+            this.inboundDialogTopViaByCSeq.put(cseq, via);
+            if (this.inboundDialogTopViaByCSeq.size() > MAX_INBOUND_DIALOG_VIA_CACHE) {
+                Long oldestCseq = null;
+                for (Long cachedCseq : this.inboundDialogTopViaByCSeq.keySet()) {
+                    if (oldestCseq == null || cachedCseq < oldestCseq) {
+                        oldestCseq = cachedCseq;
+                    }
+                }
+                if (oldestCseq != null) {
+                    this.inboundDialogTopViaByCSeq.remove(oldestCseq);
+                }
+            }
+        }
+    }
+
+    /**
+     * 按 CSeq 序号查询入局 in-dialog 请求的顶层 Via
+     *
+     * @param cseq CSeq 序号
+     * @return 顶层 Via 原文；未缓存返回 null
+     */
+    public String getInboundDialogTopVia(Long cseq) {
+        return cseq != null ? this.inboundDialogTopViaByCSeq.get(cseq) : null;
+    }
+
+    public java.util.Map<Long, String> getInboundDialogTopViaByCSeq() {
+        return inboundDialogTopViaByCSeq;
+    }
+
+    public void setInboundDialogTopViaByCSeq(java.util.Map<Long, String> inboundDialogTopViaByCSeq) {
+        this.inboundDialogTopViaByCSeq = inboundDialogTopViaByCSeq;
+    }
+
 
     public SessionInfo() {
     }

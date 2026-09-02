@@ -9,6 +9,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -26,6 +27,9 @@ public class SipSessionManager {
 
     @Resource
     private ObjectMapper objectMapper;
+
+    /** 会话读-改-写锁：Call-ID → 锁对象（同一呼叫的 in-dialog 请求并发到达时串行化会话更新） */
+    private final ConcurrentHashMap<String, Object> sessionLocks = new ConcurrentHashMap<>();
 
     /**
      * 缓存会话信息
@@ -69,6 +73,37 @@ public class SipSessionManager {
     public void updateSessionInfo(SessionInfo sessionInfo) {
         log.debug("[updateSessionInfo][更新会话信息] callId={}", sessionInfo.getCallId());
         cacheSessionInfo(sessionInfo);
+    }
+
+    /**
+     * 串行化更新会话的 in-dialog Via 缓存
+     * <p>
+     * 并发背景：同一 callId 的多个 in-dialog 请求（INFO/BYE 等）由不同线程分发处理，
+     * 各自基于同一 Redis 快照反序列化出独立对象后整对象回写，后写者会覆盖先写者新增的
+     * CSeq→Via 条目（lost-update），导致对应请求的响应查不到 Via 而回退 INVITE Via
+     * （branch 不匹配 → 网关丢弃 200 OK → 重传风暴）。本方法以 Call-ID 为粒度加锁，
+     * 将 Redis 读-改-写收敛到临界区内串行执行；sipproxy 单实例部署（B2BUA 单点），
+     * JVM 内锁即可覆盖全部并发窗口。
+     *
+     * @param callId Call-ID（会话主键）
+     * @param cseq   in-dialog 请求 CSeq 序号
+     * @param via    该请求的顶层 Via 原文（不含 "Via: " 前缀）
+     */
+    public void updateInboundDialogTopVia(String callId, Long cseq, String via) {
+        if (callId == null || cseq == null || via == null || via.isEmpty()) {
+            return;
+        }
+        Object lock = sessionLocks.computeIfAbsent(callId, k -> new Object());
+        synchronized (lock) {
+            SessionInfo sessionInfo = getSessionInfo(callId);
+            if (sessionInfo == null) {
+                // 会话已过期/不存在（呼叫已结束）：同步清理锁对象防长尾泄漏
+                sessionLocks.remove(callId);
+                return;
+            }
+            sessionInfo.cacheInboundDialogTopVia(cseq, via);
+            cacheSessionInfo(sessionInfo);
+        }
     }
 
 

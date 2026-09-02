@@ -14,6 +14,7 @@ import cn.ipcc.sipproxy.api.security.IpWhitelist;
 import cn.ipcc.sipproxy.api.security.SipRateLimiter;
 import cn.ipcc.sipproxy.api.trace.TraceContext;
 import cn.ipcc.sipproxy.api.transport.SipMessageTransport;
+import cn.ipcc.sipproxy.core.register.GatewayRegistry;
 import cn.ipcc.sipproxy.defaults.agent.DefaultAgentInfoProvider;
 import cn.ipcc.sipproxy.defaults.authentication.DefaultSipAuthenticationProvider;
 import cn.ipcc.sipproxy.defaults.authentication.DefaultWsHandshakeAuthenticator;
@@ -161,9 +162,10 @@ public class SipProxyAutoConfiguration {
     @ConditionalOnMissingBean(MessageSourceIdentifier.class)
     public MessageSourceIdentifier defaultMessageSourceIdentifier(FsNodeProvider fsNodeProvider,
                                                                    GatewayProvider gatewayProvider,
-                                                                   AgentInfoProvider agentInfoProvider) {
+                                                                   AgentInfoProvider agentInfoProvider,
+                                                                   GatewayRegistry gatewayRegistry) {
         log.info("[defaultMessageSourceIdentifier][注册默认消息来源识别器]");
-        return new DefaultMessageSourceIdentifier(fsNodeProvider, gatewayProvider, agentInfoProvider);
+        return new DefaultMessageSourceIdentifier(fsNodeProvider, gatewayProvider, agentInfoProvider, gatewayRegistry);
     }
 
     /**
